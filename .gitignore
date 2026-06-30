@@ -52,3 +52,16 @@ prompt
 server.log
 # Skills directory
 /skills/
+
+# SQLite database (don't commit user data)
+/db/*.db
+/db/*.db-journal
+/prisma/migrations/dev.db*
+
+# Playwright browsers
+/.cache/
+
+# Internal scripts / context
+/.zscripts/
+/agent-ctx/
+/worklog.md

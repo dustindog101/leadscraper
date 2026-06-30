@@ -100,6 +100,9 @@ export async function scrapeGoogleMaps(opts: ScrapeOptions): Promise<ScrapeResul
       timezoneId: 'America/New_York',
       geolocation: { latitude: 39.0458, longitude: -76.6413 }, // Maryland
       permissions: ['geolocation'],
+      extraHTTPHeaders: {
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
       ...(proxy
         ? {
             proxy: {
@@ -110,6 +113,16 @@ export async function scrapeGoogleMaps(opts: ScrapeOptions): Promise<ScrapeResul
           }
         : {}),
     })
+
+    // Force Google cookies to English/US — prevents Chinese category names like 牙醫
+    await context.addCookies([
+      {
+        name: 'goog-lr',
+        value: 'lang_en',
+        domain: '.google.com',
+        path: '/',
+      },
+    ])
 
     // Hide webdriver flag
     await context.addInitScript(() => {
