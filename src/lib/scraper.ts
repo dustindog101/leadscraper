@@ -190,17 +190,22 @@ export async function scrapeGoogleMaps(opts: ScrapeOptions): Promise<ScrapeResul
       onProgress?.(0, leads.length)
       for (let i = 0; i < leads.length; i++) {
         if (shouldCancel?.()) break
+        // Skip if we already have both phone + website from the card
         if (leads[i].phone && leads[i].website) {
           onProgress?.(i + 1, leads.length)
           continue
         }
         try {
-          await enrichLead(page, i, leads[i])
+          // Add a per-lead timeout so one hanging card doesn't block the whole job
+          await Promise.race([
+            enrichLead(page, i, leads[i]),
+            new Promise((resolve) => setTimeout(resolve, 15_000)), // 15s max per lead
+          ])
         } catch (e) {
           // ignore individual failures
         }
         onProgress?.(i + 1, leads.length)
-        await sleep(jitter(400, 1200))
+        await sleep(jitter(400, 800))
       }
     }
 
@@ -368,6 +373,29 @@ async function extractLeadsFromFeed(
           lng = parseFloat(coordMatch[2])
         }
 
+        // Try to extract phone + website from the card itself (faster than deep-scrape)
+        let phone: string | undefined
+        let website: string | undefined
+        // Phone: look for tel: links or data-item-id="phone:..." within the card
+        const phoneEl = el.querySelector('[data-item-id^="phone:"]') as HTMLElement | null
+        if (phoneEl) {
+          const raw = phoneEl.getAttribute('data-item-id') || ''
+          const digits = raw.replace(/^phone:/, '').trim()
+          if (digits) {
+            const usMatch = digits.match(/^\+?1?(\d{3})(\d{3})(\d{4})$/)
+            phone = usMatch ? `+1 ${usMatch[1]}-${usMatch[2]}-${usMatch[3]}` : digits
+          }
+        }
+        // Website: look for data-item-id="authority" within the card
+        const websiteEl = el.querySelector('[data-item-id="authority"]') as HTMLElement | null
+        if (websiteEl) {
+          let href = websiteEl.getAttribute('href') || ''
+          if (href.startsWith('/url?q=')) {
+            href = new URL(href, location.origin).searchParams.get('q') || href
+          }
+          website = href || undefined
+        }
+
         results.push({
           placeId,
           businessName: businessName.trim(),
@@ -377,6 +405,8 @@ async function extractLeadsFromFeed(
           priceLevel,
           businessStatus,
           address,
+          phone,
+          website,
           lat,
           lng,
         })
