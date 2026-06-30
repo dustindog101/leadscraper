@@ -17,7 +17,25 @@
 
 import { db } from './db'
 import { ProxyRotator, type RotateMode } from './proxy'
-import { scrapeGoogleMaps, type ScrapedLead } from './scraper'
+import { scrapeGoogleMaps, type ScrapedLead, type Review } from './scraper'
+
+/**
+ * Deduplicate reviews by author name + first 100 chars of text.
+ * Prevents the same review from being saved twice (happens when both
+ * the RPC endpoint and DOM extraction return overlapping results).
+ */
+function dedupeReviews(reviews: Review[]): Review[] {
+  const seen = new Set<string>()
+  const out: Review[] = []
+  for (const r of reviews) {
+    const key = `${r.authorName}|${r.text.slice(0, 100)}`
+    if (!seen.has(key)) {
+      seen.add(key)
+      out.push(r)
+    }
+  }
+  return out
+}
 
 export async function runSearchJob(jobId: string): Promise<void> {
   console.log(`[scraper] starting job ${jobId}`)
@@ -86,7 +104,7 @@ export async function runSearchJob(jobId: string): Promise<void> {
               ? {
                   reviews: {
                     deleteMany: {},
-                    create: lead.reviews.map((r) => ({
+                    create: dedupeReviews(lead.reviews).map((r) => ({
                       authorName: r.authorName,
                       rating: r.rating,
                       text: r.text,
@@ -129,11 +147,11 @@ export async function runSearchJob(jobId: string): Promise<void> {
           lng: lead.lng ?? null,
           businessStatus: lead.businessStatus ?? null,
           sourceJobId: jobId,
-          // Create reviews if we have them
+          // Create reviews if we have them (deduplicated by author + text)
           ...(lead.reviews && lead.reviews.length > 0
             ? {
                 reviews: {
-                  create: lead.reviews.map((r) => ({
+                  create: dedupeReviews(lead.reviews).map((r) => ({
                     authorName: r.authorName,
                     rating: r.rating,
                     text: r.text,
