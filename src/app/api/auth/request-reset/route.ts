@@ -47,9 +47,12 @@ export async function POST(req: Request) {
   })
 
   // Build the reset URL
-  const origin = req.headers.get('origin') || req.headers.get('x-forwarded-host') || ''
+  // `origin` header already includes the protocol (e.g. "https://example.com")
+  // `host` header is just the host (e.g. "example.com") — needs protocol prepended
+  const origin = req.headers.get('origin')
+  const host = req.headers.get('x-forwarded-host') || req.headers.get('host')
   const protocol = req.headers.get('x-forwarded-proto') || 'https'
-  const baseUrl = origin ? `${protocol}://${origin}` : process.env.NEXTAUTH_URL || ''
+  const baseUrl = origin || (host ? `${protocol}://${host}` : '') || process.env.NEXTAUTH_URL || ''
   const resetUrl = `${baseUrl}/?reset=${token}`
 
   // In a real app with email, we'd send this URL via email here.
