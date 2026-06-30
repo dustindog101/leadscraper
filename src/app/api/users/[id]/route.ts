@@ -3,9 +3,11 @@ import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
 import bcrypt from 'bcryptjs'
 import { db } from '@/lib/db'
+import { Prisma } from '@prisma/client'
 
-// PATCH /api/users/[id] — admin updates a user (role, name, or password)
-// Body: { role?, name?, password? }
+// PATCH /api/users/[id] — admin updates a user
+// Body: { role?, name?, password?, status? }
+// status can be: "active" (approve), "rejected" (reject), "pending" (reset)
 export async function PATCH(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -20,10 +22,11 @@ export async function PATCH(
 
   const { id } = await params
   const body = await req.json().catch(() => ({}))
-  const { role, name, password } = body as {
+  const { role, name, password, status } = body as {
     role?: string
     name?: string
     password?: string
+    status?: string
   }
 
   const target = await db.user.findUnique({ where: { id } })
@@ -31,7 +34,7 @@ export async function PATCH(
     return NextResponse.json({ error: 'User not found' }, { status: 404 })
   }
 
-  // Prevent admin from demoting themselves (locks everyone out)
+  // Prevent admin from demoting themselves
   if (id === session.user.id && role && role !== 'admin') {
     return NextResponse.json(
       { error: 'You cannot demote yourself — promote another user to admin first' },
@@ -39,10 +42,23 @@ export async function PATCH(
     )
   }
 
-  // Prevent admin from deleting themselves via password reset (edge case)
-  const data: { role?: string; name?: string; passwordHash?: string } = {}
+  // Prevent admin from deactivating themselves
+  if (id === session.user.id && status && status !== 'active') {
+    return NextResponse.json(
+      { error: 'You cannot deactivate your own account' },
+      { status: 400 }
+    )
+  }
+
+  const data: {
+    role?: string
+    name?: string
+    passwordHash?: string
+    status?: string
+  } = {}
   if (role && ['admin', 'member'].includes(role)) data.role = role
   if (name) data.name = name
+  if (status && ['active', 'pending', 'rejected'].includes(status)) data.status = status
   if (password) {
     if (password.length < 6) {
       return NextResponse.json(
@@ -57,21 +73,28 @@ export async function PATCH(
     return NextResponse.json({ error: 'No updates provided' }, { status: 400 })
   }
 
-  const updated = await db.user.update({
-    where: { id },
-    data,
-    select: { id: true, email: true, name: true, role: true },
-  })
-
-  // If password was changed, invalidate all reset tokens for this user
-  if (password) {
-    await db.passwordReset.updateMany({
-      where: { userId: id, usedAt: null },
-      data: { usedAt: new Date() },
+  try {
+    const updated = await db.user.update({
+      where: { id },
+      data,
+      select: { id: true, email: true, name: true, role: true, status: true },
     })
-  }
 
-  return NextResponse.json({ user: updated })
+    // If password was changed, invalidate all reset tokens for this user
+    if (password) {
+      await db.passwordReset.updateMany({
+        where: { userId: id, usedAt: null },
+        data: { usedAt: new Date() },
+      })
+    }
+
+    return NextResponse.json({ user: updated })
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
+      return NextResponse.json({ error: 'User not found' }, { status: 404 })
+    }
+    throw e
+  }
 }
 
 // DELETE /api/users/[id] — admin deletes a user
@@ -101,17 +124,24 @@ export async function DELETE(
     return NextResponse.json({ error: 'User not found' }, { status: 404 })
   }
 
-  // Prevent deleting the last admin (locks everyone out)
+  // Prevent deleting the last admin
   if (target.role === 'admin') {
-    const adminCount = await db.user.count({ where: { role: 'admin' } })
+    const adminCount = await db.user.count({ where: { role: 'admin', status: 'active' } })
     if (adminCount <= 1) {
       return NextResponse.json(
-        { error: 'Cannot delete the last admin — promote another user first' },
+        { error: 'Cannot delete the last active admin — promote another user first' },
         { status: 400 }
       )
     }
   }
 
-  await db.user.delete({ where: { id } })
-  return NextResponse.json({ ok: true })
+  try {
+    await db.user.delete({ where: { id } })
+    return NextResponse.json({ ok: true })
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
+      return NextResponse.json({ error: 'User not found' }, { status: 404 })
+    }
+    throw e
+  }
 }

@@ -288,6 +288,10 @@ async function extractLeadsFromFeed(
         const text = (el.innerText || '').trim()
         if (!text) return
 
+        const lines = text.split('\n').map((l) => l.trim()).filter(Boolean)
+        const businessName = (el.getAttribute('aria-label') || lines[0] || '').trim()
+        if (!businessName || businessName.length < 2) return
+
         // Place ID: from the href of the anchor (cid=... or 0x... format)
         const anchor = el.tagName === 'A' ? el : el.querySelector('a')
         const href = anchor?.getAttribute('href') || ''
@@ -299,8 +303,10 @@ async function extractLeadsFromFeed(
           if (coordMatch) placeId = `coord:${coordMatch[1]},${coordMatch[2]}`
         }
         if (!placeId) {
-          // Fallback: use the aria-label or first line of text as ID
-          placeId = `text:${text.slice(0, 80)}`
+          // Stable fallback: hash of business name + first 3 lines of text
+          // (avoids "Open 24 hours" / "Closes 9 PM" volatility causing dupes)
+          const stableText = [businessName, ...lines.slice(1, 4)].join('|')
+          placeId = `name:${stableText.slice(0, 120)}`
         }
         if (seen.includes(placeId)) return
 
@@ -309,10 +315,7 @@ async function extractLeadsFromFeed(
         // Line 2: ★ rating (reviews) · Category · Price
         // Line 3: Address
         // Sometimes followed by "Open 24 hours", "Closes 9 PM", etc.
-        const lines = text.split('\n').map((l) => l.trim()).filter(Boolean)
-
-        const businessName = anchor?.getAttribute('aria-label') || lines[0] || ''
-        if (!businessName || businessName.length < 2) return
+        // (lines + businessName already extracted above)
 
         let rating: number | undefined
         let reviewsCount: number | undefined
@@ -387,10 +390,27 @@ async function extractLeadsFromFeed(
 /**
  * Click on a result card to open the detail panel, then extract phone + website.
  */
-async function enrichLead(page: Page, index: number, lead: ScrapedLead): Promise<void> {
-  // Find the Nth result card and click it
+async function enrichLead(page: Page, _index: number, lead: ScrapedLead): Promise<void> {
+  // Find the card matching this lead's business name.
+  // We can't rely on nth(index) because Google Maps virtualizes the feed —
+  // cards get removed from the DOM as you scroll past them, so nth(50)
+  // may not be the 50th card anymore.
   const cards = page.locator('[role="feed"] [role="article"]')
-  const card = cards.nth(index)
+  const count = await cards.count().catch(() => 0)
+  if (count === 0) return
+
+  let card = null
+  // Try to find a card whose aria-label matches the business name
+  for (let i = 0; i < Math.min(count, 20); i++) {
+    const c = cards.nth(i)
+    const label = await c.getAttribute('aria-label').catch(() => null)
+    if (label && label.trim() === lead.businessName) {
+      card = c
+      break
+    }
+  }
+  // Fallback: use the first card if no match
+  if (!card) card = cards.nth(0)
   if (!(await card.isVisible().catch(() => false))) return
 
   await card.click({ timeout: 10_000 }).catch(() => {})

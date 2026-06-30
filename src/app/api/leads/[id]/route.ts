@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
 import { db } from '@/lib/db'
+import { Prisma } from '@prisma/client'
 
 // DELETE /api/leads/[id] — delete a single lead
 export async function DELETE(
@@ -14,6 +15,13 @@ export async function DELETE(
   }
 
   const { id } = await params
-  await db.lead.delete({ where: { id } })
-  return NextResponse.json({ ok: true })
+  try {
+    await db.lead.delete({ where: { id } })
+    return NextResponse.json({ ok: true })
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
+      return NextResponse.json({ error: 'Lead not found' }, { status: 404 })
+    }
+    throw e
+  }
 }

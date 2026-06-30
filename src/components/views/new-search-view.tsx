@@ -29,9 +29,10 @@ const PRESET_LOCATIONS = [
 
 interface NewSearchViewProps {
   onDone: () => void
+  onNavigate?: (view: 'stats' | 'new-search' | 'leads' | 'jobs' | 'proxies' | 'settings') => void
 }
 
-export function NewSearchView({ onDone }: NewSearchViewProps) {
+export function NewSearchView({ onDone, onNavigate }: NewSearchViewProps) {
   const [query, setQuery] = useState('')
   const [location, setLocation] = useState('')
   const [maxResults, setMaxResults] = useState(200)
@@ -180,7 +181,7 @@ export function NewSearchView({ onDone }: NewSearchViewProps) {
                 {proxiesData?.configs.length === 0 ? (
                   <div className="rounded-md border border-dashed p-4 text-center">
                     <p className="text-sm text-muted-foreground mb-2">No proxy configs yet.</p>
-                    <Button type="button" variant="outline" size="sm" onClick={onDone}>
+                    <Button type="button" variant="outline" size="sm" onClick={() => onNavigate?.('proxies')}>
                       Add one in the Proxies tab
                     </Button>
                   </div>

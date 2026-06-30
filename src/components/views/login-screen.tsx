@@ -37,17 +37,36 @@ export function LoginScreen() {
   async function handleSignIn(e: React.FormEvent) {
     e.preventDefault()
     setLoading(true)
-    const res = await signIn('credentials', {
-      email: signinEmail,
-      password: signinPassword,
-      redirect: false,
-    })
-    setLoading(false)
-    if (res?.error) {
-      toast.error('Invalid email or password')
-      return
+    try {
+      const res = await signIn('credentials', {
+        email: signinEmail,
+        password: signinPassword,
+        redirect: false,
+      })
+      setLoading(false)
+      if (res?.error) {
+        // NextAuth wraps our custom authorize() error in "CredentialsSignin".
+        // To get the specific message, we fetch it via a custom endpoint.
+        let msg = 'Invalid email or password'
+        try {
+          const check = await fetch(`/api/auth/check-credentials`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email: signinEmail, password: signinPassword }),
+          })
+          const data = await check.json()
+          if (data.error) msg = data.error
+        } catch {
+          // fall back to generic
+        }
+        toast.error(msg)
+        return
+      }
+      router.refresh()
+    } catch (err) {
+      setLoading(false)
+      toast.error('Sign-in service unavailable. Please try again.')
     }
-    router.refresh()
   }
 
   async function handleSignUp(e: React.FormEvent) {
@@ -68,18 +87,30 @@ export function LoginScreen() {
         toast.error(data.error || 'Failed to create account')
         return
       }
-      // Auto-sign-in
-      const r = await signIn('credentials', {
-        email: signupEmail,
-        password: signupPassword,
-        redirect: false,
-      })
-      if (r?.error) {
-        toast.error('Account created but sign-in failed. Please sign in.')
-        return
+
+      // If first user (admin, active) — auto-sign-in
+      if (!data.pending) {
+        const r = await signIn('credentials', {
+          email: signupEmail,
+          password: signupPassword,
+          redirect: false,
+        })
+        if (r?.error) {
+          toast.error('Account created but sign-in failed. Please sign in.')
+          return
+        }
+        toast.success(`Account created — welcome, ${data.user?.name || 'admin'}!`)
+        router.refresh()
+      } else {
+        // Pending approval — don't auto-sign-in (would fail anyway)
+        toast.success('Account created! An admin needs to approve you before you can sign in.')
+        setSignupName('')
+        setSignupEmail('')
+        setSignupPassword('')
+        // Switch to sign-in tab so they see the message context
+        const signinTab = document.querySelector('[role="tab"][data-state="inactive"]') as HTMLButtonElement
+        if (signinTab) signinTab.click()
       }
-      toast.success(`Account created — welcome, ${data.user?.name || 'admin'}!`)
-      router.refresh()
     } finally {
       setLoading(false)
     }
@@ -227,7 +258,7 @@ export function LoginScreen() {
                       minLength={6}
                     />
                     <p className="text-xs text-muted-foreground">
-                      The first account created becomes the team admin.
+                      The first account becomes the admin. All other accounts need admin approval before they can sign in.
                     </p>
                   </div>
                   <Button type="submit" disabled={loading} className="w-full">

@@ -17,6 +17,7 @@ model User {
   name          String?
   passwordHash  String
   role          String    @default("member") // "admin" | "member"
+  status        String    @default("active") // "active" | "pending" | "rejected"
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 

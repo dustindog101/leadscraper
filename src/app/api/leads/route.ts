@@ -11,7 +11,7 @@ import { db } from '@/lib/db'
 //   - city        : exact match
 //   - state       : exact match
 //   - category    : exact match
-//   - tagId       : filter by tag
+//   - tagId       : filter by tag (current user's tags only)
 //   - jobId       : filter by source job
 //   - limit       : default 50, max 500
 //   - offset      : default 0
@@ -38,10 +38,10 @@ export async function GET(req: Request) {
 
   if (q) {
     where.OR = [
-      { businessName: { contains: q } },
-      { address: { contains: q } },
+      { businessName: { contains: q, mode: 'insensitive' } },
+      { address: { contains: q, mode: 'insensitive' } },
       { phone: { contains: q } },
-      { category: { contains: q } },
+      { category: { contains: q, mode: 'insensitive' } },
     ]
   }
   if (hasWebsite === 'true') where.website = { not: null }
@@ -50,9 +50,10 @@ export async function GET(req: Request) {
   if (state) where.state = state
   if (category) where.category = category
   if (jobId) where.sourceJobId = jobId
-  if (tagId) where.tags = { some: { tagId } }
+  // Tags are user-scoped — only filter by current user's tags
+  if (tagId) where.tags = { some: { tagId, userId: session.user.id } }
 
-  const [leads, total] = await Promise.all([
+  const [leads, total, noWebsiteTotal] = await Promise.all([
     db.lead.findMany({
       where,
       orderBy: { discoveredAt: 'desc' },
@@ -60,10 +61,15 @@ export async function GET(req: Request) {
       skip: offset,
       include: {
         contacts: { orderBy: { confidence: 'desc' }, take: 1 },
-        tags: { include: { tag: true } },
+        // Only include the current user's tags
+        tags: {
+          where: { userId: session.user.id },
+          include: { tag: true },
+        },
       },
     }),
     db.lead.count({ where }),
+    db.lead.count({ where: { ...where, website: null } }),
   ])
 
   // Distinct values for filter dropdowns
@@ -89,6 +95,7 @@ export async function GET(req: Request) {
   return NextResponse.json({
     leads,
     total,
+    noWebsiteTotal,
     offset,
     limit,
     filters: {

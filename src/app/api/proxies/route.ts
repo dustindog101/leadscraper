@@ -3,8 +3,10 @@ import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
 import { db } from '@/lib/db'
 import { describeProxyCount, parseProxyList } from '@/lib/proxy'
+import { Prisma } from '@prisma/client'
 
 // GET /api/proxies — list all proxy configs
+// Per user request: all team members see full proxy credentials (no masking)
 export async function GET() {
   const session = await getServerSession(authOptions)
   if (!session?.user) {
@@ -20,12 +22,8 @@ export async function GET() {
       ...c,
       proxyCount: parseProxyList(c.proxies).length,
       proxyDescription: describeProxyCount(c.proxies),
-      // Don't leak full proxy strings (with passwords) to the client — only show the masked preview
-      proxiesPreview: c.proxies
-        .split(/\r?\n/)
-        .filter(Boolean)
-        .slice(0, 3)
-        .map(maskProxy),
+      // Full proxy list visible to all team members (per user's choice)
+      proxiesList: c.proxies.split(/\r?\n/).filter(Boolean),
     })),
   })
 }
@@ -83,11 +81,7 @@ export async function POST(req: Request) {
       ...config,
       proxyCount: parsed.length,
       proxyDescription: describeProxyCount(config.proxies),
+      proxiesList: config.proxies.split(/\r?\n/).filter(Boolean),
     },
   })
-}
-
-function maskProxy(line: string): string {
-  // Mask the password in preview URLs
-  return line.replace(/(:[^:@/]+)@/, ':****@')
 }

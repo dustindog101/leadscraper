@@ -79,6 +79,7 @@ export interface User {
   email: string
   name?: string | null
   role: string
+  status: string
   createdAt: string
 }
 
@@ -139,6 +140,7 @@ export const api = {
     return fetchJson<{
       leads: Lead[]
       total: number
+      noWebsiteTotal: number
       offset: number
       limit: number
       filters: {

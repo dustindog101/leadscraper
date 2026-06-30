@@ -14,12 +14,13 @@ export async function GET() {
   }
 
   const users = await db.user.findMany({
-    orderBy: { createdAt: 'asc' },
+    orderBy: [{ status: 'asc' }, { createdAt: 'asc' }],
     select: {
       id: true,
       email: true,
       name: true,
       role: true,
+      status: true,
       createdAt: true,
     },
   })

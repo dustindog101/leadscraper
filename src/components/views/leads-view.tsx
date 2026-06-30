@@ -1,7 +1,7 @@
 'use client'
 
-import { useState, useMemo } from 'react'
-import { useQuery, useMutation } from '@tanstack/react-query'
+import { useState } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api, type Lead } from '@/lib/api/client'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -21,6 +21,7 @@ import { toast } from 'sonner'
 const PAGE_SIZE = 25
 
 export function LeadsView() {
+  const queryClient = useQueryClient()
   const [q, setQ] = useState('')
   const [hasWebsite, setHasWebsite] = useState<'any' | 'true' | 'false'>('any')
   const [city, setCity] = useState('')
@@ -52,8 +53,8 @@ export function LeadsView() {
     mutationFn: ({ leadId, tagName, action }: { leadId: string; tagName: string; action: 'add' | 'remove' }) =>
       api.tagLead(leadId, tagName, action),
     onSuccess: () => {
-      // refetch
-      window.dispatchEvent(new CustomEvent('refetch-leads'))
+      queryClient.invalidateQueries({ queryKey: ['leads'] })
+      queryClient.invalidateQueries({ queryKey: ['stats'] })
     },
     onError: (e: Error) => toast.error(e.message),
   })
@@ -62,7 +63,8 @@ export function LeadsView() {
     mutationFn: api.deleteLead,
     onSuccess: () => {
       toast.success('Lead deleted')
-      window.dispatchEvent(new CustomEvent('refetch-leads'))
+      queryClient.invalidateQueries({ queryKey: ['leads'] })
+      queryClient.invalidateQueries({ queryKey: ['stats'] })
     },
   })
 
@@ -112,7 +114,9 @@ export function LeadsView() {
       .then(() => {
         toast.success(`Tagged ${targets.length} lead${targets.length > 1 ? 's' : ''} as "${tagName}"`)
         setTagInput('')
-        window.dispatchEvent(new CustomEvent('refetch-leads'))
+        setSelected(new Set())
+        queryClient.invalidateQueries({ queryKey: ['leads'] })
+        queryClient.invalidateQueries({ queryKey: ['stats'] })
       })
       .catch((e) => toast.error(e.message))
   }
@@ -126,10 +130,10 @@ export function LeadsView() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Leads</h1>
           <p className="text-sm text-muted-foreground">
-            {total.toLocaleString()} total · {data ? (total - (data.total - data.leads.filter((l) => !l.website).length) > 0 ? '' : '') : ''}
-            {data && data.leads.filter((l) => !l.website).length > 0 && (
-              <span className="text-amber-600 font-medium ml-1">
-                · {data.leads.filter((l) => !l.website).length} of {data.leads.length} shown have no website
+            {total.toLocaleString()} total
+            {data && data.noWebsiteTotal > 0 && (
+              <span className="text-amber-600 font-medium ml-2">
+                · {data.noWebsiteTotal.toLocaleString()} without website (prime prospects)
               </span>
             )}
           </p>

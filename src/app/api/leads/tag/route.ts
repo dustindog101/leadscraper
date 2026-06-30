@@ -47,11 +47,11 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true, tagId: tag.id })
   }
 
-  // remove
+  // remove — only removes the current user's tag, not other users'
   const tag = await db.tag.findUnique({ where: { name: tagName } })
   if (!tag) return NextResponse.json({ ok: true })
   await db.leadTag.deleteMany({
-    where: { leadId, tagId: tag.id },
+    where: { leadId, tagId: tag.id, userId: session.user.id },
   })
   return NextResponse.json({ ok: true })
 }

@@ -78,7 +78,7 @@ export async function runSearchJob(jobId: string): Promise<void> {
       await db.searchJob.update({
         where: { id: jobId },
         data: {
-          status: result.blocked ? 'failed' : 'failed',
+          status: 'failed',
           errorMsg: result.error,
           progress: 100,
           finishedAt: new Date(),

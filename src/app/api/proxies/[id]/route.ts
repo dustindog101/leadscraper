@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
 import { db } from '@/lib/db'
+import { Prisma } from '@prisma/client'
 
 // DELETE /api/proxies/[id] — delete a proxy config
 export async function DELETE(
@@ -14,11 +15,18 @@ export async function DELETE(
   }
 
   const { id } = await params
-  await db.proxyConfig.delete({ where: { id } })
-  return NextResponse.json({ ok: true })
+  try {
+    await db.proxyConfig.delete({ where: { id } })
+    return NextResponse.json({ ok: true })
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
+      return NextResponse.json({ error: 'Proxy config not found' }, { status: 404 })
+    }
+    throw e
+  }
 }
 
-// PATCH /api/proxies/[id] — update (enable/disable)
+// PATCH /api/proxies/[id] — update (enable/disable, name, rotateMode)
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const session = await getServerSession(authOptions)
   if (!session?.user) {
@@ -33,14 +41,20 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     rotateMode?: string
   }
 
-  const config = await db.proxyConfig.update({
-    where: { id },
-    data: {
-      ...(enabled !== undefined ? { enabled } : {}),
-      ...(name ? { name } : {}),
-      ...(rotateMode ? { rotateMode } : {}),
-    },
-  })
-
-  return NextResponse.json({ config })
+  try {
+    const config = await db.proxyConfig.update({
+      where: { id },
+      data: {
+        ...(enabled !== undefined ? { enabled } : {}),
+        ...(name ? { name } : {}),
+        ...(rotateMode ? { rotateMode } : {}),
+      },
+    })
+    return NextResponse.json({ config })
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2025') {
+      return NextResponse.json({ error: 'Proxy config not found' }, { status: 404 })
+    }
+    throw e
+  }
 }

@@ -16,15 +16,34 @@ export const authOptions: NextAuthOptions = {
         password: { label: 'Password', type: 'password' },
       },
       async authorize(credentials) {
-        if (!credentials?.email || !credentials?.password) return null
+        if (!credentials?.email || !credentials?.password) {
+          throw new Error('Please enter your email and password')
+        }
 
         const user = await db.user.findUnique({
           where: { email: credentials.email.toLowerCase() },
         })
-        if (!user) return null
+
+        if (!user) {
+          throw new Error('No account found with that email')
+        }
+
+        // Check status before password (so pending users get the right message
+        // even if they type the correct password)
+        if (user.status === 'pending') {
+          throw new Error('Your account is pending admin approval')
+        }
+        if (user.status === 'rejected') {
+          throw new Error('Your account access has been denied. Contact an admin.')
+        }
+        if (user.status !== 'active') {
+          throw new Error('Your account is not active. Contact an admin.')
+        }
 
         const valid = await bcrypt.compare(credentials.password, user.passwordHash)
-        if (!valid) return null
+        if (!valid) {
+          throw new Error('Incorrect password')
+        }
 
         return {
           id: user.id,

@@ -151,7 +151,7 @@ export function Dashboard({ session }: DashboardProps) {
         {/* Main content */}
         <main className="flex-1 min-w-0 p-4 md:p-6">
           {view === 'stats' && <StatsView onNavigate={setView} />}
-          {view === 'new-search' && <NewSearchView onDone={() => setView('jobs')} />}
+          {view === 'new-search' && <NewSearchView onDone={() => setView('jobs')} onNavigate={setView} />}
           {view === 'leads' && <LeadsView />}
           {view === 'jobs' && <JobsView />}
           {view === 'proxies' && <ProxiesView />}
