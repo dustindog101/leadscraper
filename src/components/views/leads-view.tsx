@@ -619,7 +619,23 @@ function LeadRow({
                   </div>
                 </div>
 
-                <div className="flex gap-2 pt-2">
+                <div className="flex flex-wrap gap-2 pt-2">
+                  {lead.placeUrl && (
+                    <a href={lead.placeUrl} target="_blank" rel="noopener noreferrer">
+                      <Button size="sm" variant="outline" className="gap-1">
+                        <MapPin className="h-3.5 w-3.5" /> Open in Google Maps
+                        <ExternalLink className="h-2.5 w-2.5" />
+                      </Button>
+                    </a>
+                  )}
+                  {lead.website && (
+                    <a href={lead.website.startsWith('http') ? lead.website : `https://${lead.website}`} target="_blank" rel="noopener noreferrer">
+                      <Button size="sm" variant="outline" className="gap-1">
+                        <Globe className="h-3.5 w-3.5" /> Visit Website
+                        <ExternalLink className="h-2.5 w-2.5" />
+                      </Button>
+                    </a>
+                  )}
                   <Button
                     size="sm"
                     variant="destructive"

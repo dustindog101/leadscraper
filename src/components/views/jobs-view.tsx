@@ -7,7 +7,10 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Server, RefreshCw, XCircle, AlertCircle, CheckCircle2 } from 'lucide-react'
+import {
+  Server, RefreshCw, XCircle, AlertCircle, CheckCircle2,
+  Pause, Play, RotateCcw,
+} from 'lucide-react'
 import { formatDistanceToNow } from 'date-fns'
 import { toast } from 'sonner'
 
@@ -20,10 +23,25 @@ export function JobsView() {
 
   const cancelMutation = useMutation({
     mutationFn: api.cancelJob,
-    onSuccess: () => {
-      toast.success('Job cancelled')
-      refetch()
-    },
+    onSuccess: () => { toast.success('Job cancelled'); refetch() },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  const pauseMutation = useMutation({
+    mutationFn: api.pauseJob,
+    onSuccess: () => { toast.success('Job paused'); refetch() },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  const resumeMutation = useMutation({
+    mutationFn: api.resumeJob,
+    onSuccess: () => { toast.success('Job resumed'); refetch() },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  const retryMutation = useMutation({
+    mutationFn: api.retryJob,
+    onSuccess: () => { toast.success('Job queued for retry'); refetch() },
     onError: (e: Error) => toast.error(e.message),
   })
 
@@ -33,7 +51,7 @@ export function JobsView() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Scrape Jobs</h1>
           <p className="text-sm text-muted-foreground">
-            All scraping runs in your workspace. Auto-refreshes every 3s.
+            All scraping runs in your workspace. Auto-refreshes every 3s. Leads are saved live as they&apos;re found.
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={() => refetch()} disabled={isFetching}>
@@ -84,11 +102,14 @@ export function JobsView() {
                       </div>
                     )}
 
-                    {job.status === 'running' && (
+                    {(job.status === 'running' || job.status === 'paused') && (
                       <div className="mt-3 space-y-1">
-                        <Progress value={job.progress} className="h-1.5" />
+                        <Progress value={job.progress} className={`h-1.5 ${job.status === 'paused' ? 'opacity-50' : ''}`} />
                         <div className="flex justify-between text-xs text-muted-foreground">
-                          <span>{job.progress}% · {job.leadsFound} leads so far</span>
+                          <span>
+                            {job.status === 'paused' ? '⏸ Paused' : `${job.progress}%`} · {job.leadsFound} leads so far
+                            {job.noWebsiteCount > 0 && <span className="text-amber-600 ml-1">({job.noWebsiteCount} no website)</span>}
+                          </span>
                           <span>max {job.maxResults}</span>
                         </div>
                       </div>
@@ -109,18 +130,56 @@ export function JobsView() {
                         )}
                       </div>
                     )}
+
+                    {job.status === 'failed' && (
+                      <div className="text-xs mt-2 flex gap-4">
+                        <span className="text-destructive"><strong>{job.leadsFound}</strong> leads saved before failure</span>
+                      </div>
+                    )}
                   </div>
 
-                  {(job.status === 'running' || job.status === 'queued') && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => cancelMutation.mutate(job.id)}
-                      disabled={cancelMutation.isPending}
-                    >
-                      <XCircle className="h-3.5 w-3.5 mr-1" /> Cancel
-                    </Button>
-                  )}
+                  <div className="flex items-center gap-1 flex-wrap justify-end">
+                    {job.status === 'running' && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => pauseMutation.mutate(job.id)}
+                        disabled={pauseMutation.isPending}
+                      >
+                        <Pause className="h-3.5 w-3.5 mr-1" /> Pause
+                      </Button>
+                    )}
+                    {job.status === 'paused' && (
+                      <Button
+                        size="sm"
+                        variant="default"
+                        onClick={() => resumeMutation.mutate(job.id)}
+                        disabled={resumeMutation.isPending}
+                      >
+                        <Play className="h-3.5 w-3.5 mr-1" /> Resume
+                      </Button>
+                    )}
+                    {(job.status === 'running' || job.status === 'queued' || job.status === 'paused') && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => cancelMutation.mutate(job.id)}
+                        disabled={cancelMutation.isPending}
+                      >
+                        <XCircle className="h-3.5 w-3.5 mr-1" /> Cancel
+                      </Button>
+                    )}
+                    {(job.status === 'failed' || job.status === 'cancelled') && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => retryMutation.mutate(job.id)}
+                        disabled={retryMutation.isPending}
+                      >
+                        <RotateCcw className="h-3.5 w-3.5 mr-1" /> Retry
+                      </Button>
+                    )}
+                  </div>
                 </div>
               </CardContent>
             </Card>
@@ -135,6 +194,7 @@ function StatusBadge({ status }: { status: string }) {
   const map: Record<string, { variant: 'default' | 'secondary' | 'destructive' | 'outline'; label: string; icon?: React.ElementType }> = {
     queued: { variant: 'outline', label: 'Queued' },
     running: { variant: 'default', label: 'Running' },
+    paused: { variant: 'secondary', label: 'Paused', icon: Pause },
     done: { variant: 'secondary', label: 'Done', icon: CheckCircle2 },
     failed: { variant: 'destructive', label: 'Failed', icon: AlertCircle },
     cancelled: { variant: 'outline', label: 'Cancelled' },

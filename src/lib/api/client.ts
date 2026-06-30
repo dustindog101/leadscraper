@@ -5,7 +5,7 @@ export interface Job {
   query: string
   location: string
   maxResults: number
-  status: 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
+  status: 'queued' | 'running' | 'paused' | 'done' | 'failed' | 'cancelled'
   progress: number
   leadsFound: number
   noWebsiteCount: number
@@ -31,6 +31,7 @@ export interface Lead {
   country?: string | null
   phone?: string | null
   website?: string | null
+  placeUrl?: string | null
   category?: string | null
   rating?: number | null
   reviewsCount?: number | null
@@ -129,6 +130,24 @@ export const api = {
     fetchJson<{ job: Job }>(`/api/jobs/${id}`, {
       method: 'POST',
       body: JSON.stringify({ action: 'cancel' }),
+    }),
+
+  pauseJob: (id: string) =>
+    fetchJson<{ job: Job }>(`/api/jobs/${id}`, {
+      method: 'POST',
+      body: JSON.stringify({ action: 'pause' }),
+    }),
+
+  resumeJob: (id: string) =>
+    fetchJson<{ job: Job }>(`/api/jobs/${id}`, {
+      method: 'POST',
+      body: JSON.stringify({ action: 'resume' }),
+    }),
+
+  retryJob: (id: string) =>
+    fetchJson<{ job: Job }>(`/api/jobs/${id}`, {
+      method: 'POST',
+      body: JSON.stringify({ action: 'retry' }),
     }),
 
   // Leads

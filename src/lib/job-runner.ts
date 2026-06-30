@@ -5,17 +5,19 @@
  *  1. Marks the SearchJob as "running"
  *  2. Loads the proxy config (if any)
  *  3. Calls the Google Maps scraper
- *  4. Writes leads to the DB (deduplicating by placeId)
+ *  4. Writes leads to the DB IMMEDIATELY as they're scraped (via onLead callback)
  *  5. Updates the job's progress + final status
  *
- * Designed to run in a Next.js API route on a local laptop (Phase 1).
- * For Vercel deployment, this same function should be wrapped in an Inngest
- * step function and run on a separate Railway/Render worker (Phase 2).
+ * Supports pause/cancel via DB polling:
+ *  - status = "cancelled" → stop scraping, keep partial leads
+ *  - status = "paused" → wait until resumed, then continue
+ *
+ * Designed to run on the Railway worker (or locally).
  */
 
 import { db } from './db'
 import { ProxyRotator, type RotateMode } from './proxy'
-import { scrapeGoogleMaps } from './scraper'
+import { scrapeGoogleMaps, type ScrapedLead } from './scraper'
 
 export async function runSearchJob(jobId: string): Promise<void> {
   console.log(`[scraper] starting job ${jobId}`)
@@ -30,7 +32,7 @@ export async function runSearchJob(jobId: string): Promise<void> {
 
   await db.searchJob.update({
     where: { id: jobId },
-    data: { status: 'running', startedAt: new Date(), progress: 0 },
+    data: { status: 'running', startedAt: new Date(), progress: 0, errorMsg: null },
   })
 
   let proxyRotator: ProxyRotator | undefined
@@ -42,13 +44,90 @@ export async function runSearchJob(jobId: string): Promise<void> {
     console.log(`[scraper] using proxy config "${job.proxyConfig.name}" (${proxyRotator.count} proxies)`)
   }
 
-  // Polling-based cancel check
+  // Track which leads we've already saved (to avoid duplicate writes on re-save)
+  const savedLeadIds = new Set<string>()
+  let noWebsiteCount = 0
+  let totalSaved = 0
+
+  // Save a lead to the DB immediately (upsert by placeId)
+  async function saveLead(lead: ScrapedLead) {
+    if (savedLeadIds.has(lead.placeId)) {
+      // Update existing lead with enriched data
+      try {
+        await db.lead.update({
+          where: { placeId: lead.placeId },
+          data: {
+            phone: lead.phone ?? undefined,
+            website: lead.website ?? undefined,
+            placeUrl: lead.placeUrl ?? undefined,
+            address: lead.address ?? undefined,
+            city: lead.city ?? undefined,
+            state: lead.state ?? undefined,
+            zip: lead.zip ?? undefined,
+            category: lead.category ?? undefined,
+            rating: lead.rating ?? undefined,
+            reviewsCount: lead.reviewsCount ?? undefined,
+            priceLevel: lead.priceLevel ?? undefined,
+            lat: lead.lat ?? undefined,
+            lng: lead.lng ?? undefined,
+            businessStatus: lead.businessStatus ?? undefined,
+            updatedAt: new Date(),
+          },
+        })
+      } catch {
+        // ignore individual update errors
+      }
+      return
+    }
+
+    savedLeadIds.add(lead.placeId)
+
+    try {
+      await db.lead.upsert({
+        where: { placeId: lead.placeId },
+        create: {
+          placeId: lead.placeId,
+          businessName: lead.businessName,
+          address: lead.address ?? null,
+          city: lead.city ?? null,
+          state: lead.state ?? null,
+          zip: lead.zip ?? null,
+          country: lead.country ?? null,
+          phone: lead.phone ?? null,
+          website: lead.website ?? null,
+          placeUrl: lead.placeUrl ?? null,
+          category: lead.category ?? null,
+          rating: lead.rating ?? null,
+          reviewsCount: lead.reviewsCount ?? null,
+          priceLevel: lead.priceLevel ?? null,
+          lat: lead.lat ?? null,
+          lng: lead.lng ?? null,
+          businessStatus: lead.businessStatus ?? null,
+          sourceJobId: jobId,
+        },
+        update: {},
+      })
+      totalSaved++
+      if (!lead.website) noWebsiteCount++
+
+      // Update job progress + lead count in DB (throttled — don't write on every lead)
+      // We'll update the count periodically via the progress callback
+    } catch (e) {
+      // skip individual write errors
+    }
+  }
+
+  // Check cancel/pause status every 3 seconds
   let cancelled = false
-  const cancelPoll = setInterval(async () => {
+  let paused = false
+  const statusPoll = setInterval(async () => {
     const fresh = await db.searchJob.findUnique({ where: { id: jobId }, select: { status: true } })
     if (fresh?.status === 'cancelled') {
       cancelled = true
-      clearInterval(cancelPoll)
+    } else if (fresh?.status === 'paused') {
+      paused = true
+    } else if (fresh?.status === 'running') {
+      paused = false
     }
   }, 3000)
 
@@ -58,23 +137,38 @@ export async function runSearchJob(jobId: string): Promise<void> {
       location: job.location,
       maxResults: job.maxResults,
       proxyRotator,
-      deepScrape: true,
       headless: true,
+      concurrency: 3,
       shouldCancel: () => cancelled,
-      onProgress: async (count, total) => {
-        const pct = Math.min(99, Math.round((count / Math.max(total, 1)) * 100))
-        await db.searchJob
-          .update({
-            where: { id: jobId },
-            data: { progress: pct, leadsFound: count },
-          })
-          .catch(() => {})
+      shouldPause: () => paused,
+      onLead: async (lead) => {
+        await saveLead(lead)
+        // Update job leadsFound count
+        await db.searchJob.update({
+          where: { id: jobId },
+          data: { leadsFound: totalSaved, noWebsiteCount },
+        }).catch(() => {})
+      },
+      onProgress: async (phase, count, total) => {
+        // Calculate overall progress:
+        // - collect phase: 0-50% (collecting leads from feed)
+        // - enrich phase: 50-100% (enriching each lead with phone/website)
+        let pct = 0
+        if (phase === 'collect') {
+          pct = Math.min(50, Math.round((count / Math.max(total, 1)) * 50))
+        } else {
+          pct = 50 + Math.min(50, Math.round((count / Math.max(total, 1)) * 50))
+        }
+        await db.searchJob.update({
+          where: { id: jobId },
+          data: { progress: pct, leadsFound: totalSaved, noWebsiteCount },
+        }).catch(() => {})
       },
     })
 
-    clearInterval(cancelPoll)
+    clearInterval(statusPoll)
 
-    if (result.error && result.leads.length === 0) {
+    if (result.error && totalSaved === 0) {
       await db.searchJob.update({
         where: { id: jobId },
         data: {
@@ -88,60 +182,12 @@ export async function runSearchJob(jobId: string): Promise<void> {
       return
     }
 
-    // Persist leads (upsert by placeId)
-    let noWebsiteCount = 0
-    let persisted = 0
-    for (const lead of result.leads) {
-      try {
-        const data = {
-          placeId: lead.placeId,
-          businessName: lead.businessName,
-          address: lead.address ?? null,
-          city: lead.city ?? null,
-          state: lead.state ?? null,
-          zip: lead.zip ?? null,
-          country: lead.country ?? null,
-          phone: lead.phone ?? null,
-          website: lead.website ?? null,
-          category: lead.category ?? null,
-          rating: lead.rating ?? null,
-          reviewsCount: lead.reviewsCount ?? null,
-          priceLevel: lead.priceLevel ?? null,
-          lat: lead.lat ?? null,
-          lng: lead.lng ?? null,
-          businessStatus: lead.businessStatus ?? null,
-          sourceJobId: jobId,
-        }
-        await db.lead.upsert({
-          where: { placeId: lead.placeId },
-          create: data,
-          update: {
-            // Update fields that may be enriched in subsequent runs
-            phone: data.phone ?? undefined,
-            website: data.website ?? undefined,
-            address: data.address ?? undefined,
-            city: data.city ?? undefined,
-            state: data.state ?? undefined,
-            category: data.category ?? undefined,
-            rating: data.rating ?? undefined,
-            reviewsCount: data.reviewsCount ?? undefined,
-            sourceJobId: jobId,
-            updatedAt: new Date(),
-          },
-        })
-        persisted++
-        if (!lead.website) noWebsiteCount++
-      } catch (e) {
-        // skip individual write errors (likely unique constraint race)
-      }
-    }
-
     await db.searchJob.update({
       where: { id: jobId },
       data: {
         status: cancelled ? 'cancelled' : 'done',
         progress: 100,
-        leadsFound: persisted,
+        leadsFound: totalSaved,
         noWebsiteCount,
         errorMsg: result.error,
         finishedAt: new Date(),
@@ -149,10 +195,10 @@ export async function runSearchJob(jobId: string): Promise<void> {
     })
 
     console.log(
-      `[scraper] job ${jobId} done — ${persisted} leads (${noWebsiteCount} without website)`
+      `[scraper] job ${jobId} ${cancelled ? 'cancelled' : 'done'} — ${totalSaved} leads (${noWebsiteCount} without website)`
     )
   } catch (e) {
-    clearInterval(cancelPoll)
+    clearInterval(statusPoll)
     const msg = e instanceof Error ? e.message : String(e)
     await db.searchJob.update({
       where: { id: jobId },

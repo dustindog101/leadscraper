@@ -29,7 +29,7 @@ export async function GET(
   return NextResponse.json({ job })
 }
 
-// POST /api/jobs/[id] — update a job (cancel)
+// POST /api/jobs/[id] — update a job (cancel, pause, resume)
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const session = await getServerSession(authOptions)
   if (!session?.user) {
@@ -38,12 +38,13 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
   const { id } = await params
   const body = await req.json().catch(() => ({}))
-  const { action } = body as { action?: 'cancel' }
+  const { action } = body as { action?: 'cancel' | 'pause' | 'resume' | 'retry' }
+
+  const job = await db.searchJob.findUnique({ where: { id } })
+  if (!job) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
   if (action === 'cancel') {
-    const job = await db.searchJob.findUnique({ where: { id } })
-    if (!job) return NextResponse.json({ error: 'Not found' }, { status: 404 })
-    if (job.status === 'done' || job.status === 'failed' || job.status === 'cancelled') {
+    if (['done', 'failed', 'cancelled'].includes(job.status)) {
       return NextResponse.json({ error: `Cannot cancel a ${job.status} job` }, { status: 400 })
     }
     const updated = await db.searchJob.update({
@@ -53,5 +54,44 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     return NextResponse.json({ job: updated })
   }
 
-  return NextResponse.json({ error: 'Unknown action' }, { status: 400 })
+  if (action === 'pause') {
+    if (job.status !== 'running') {
+      return NextResponse.json({ error: `Can only pause a running job (current: ${job.status})` }, { status: 400 })
+    }
+    const updated = await db.searchJob.update({
+      where: { id },
+      data: { status: 'paused' },
+    })
+    return NextResponse.json({ job: updated })
+  }
+
+  if (action === 'resume') {
+    if (job.status !== 'paused') {
+      return NextResponse.json({ error: `Can only resume a paused job (current: ${job.status})` }, { status: 400 })
+    }
+    const updated = await db.searchJob.update({
+      where: { id },
+      data: { status: 'running' },
+    })
+    return NextResponse.json({ job: updated })
+  }
+
+  if (action === 'retry') {
+    if (!['failed', 'cancelled'].includes(job.status)) {
+      return NextResponse.json({ error: `Can only retry a failed or cancelled job (current: ${job.status})` }, { status: 400 })
+    }
+    const updated = await db.searchJob.update({
+      where: { id },
+      data: {
+        status: 'queued',
+        progress: 0,
+        errorMsg: null,
+        startedAt: null,
+        finishedAt: null,
+      },
+    })
+    return NextResponse.json({ job: updated })
+  }
+
+  return NextResponse.json({ error: 'Unknown action. Use cancel, pause, resume, or retry.' }, { status: 400 })
 }

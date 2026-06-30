@@ -1,18 +1,23 @@
 /**
- * Google Maps business scraper using Playwright.
+ * Google Maps business scraper using Patchright (Playwright fork).
  *
  * Strategy:
  *  1. Open https://www.google.com/maps/search/{query}+{location}
  *  2. Wait for the results feed `[role="feed"]`
  *  3. Auto-scroll the feed until we hit maxResults or no new results load
  *  4. For each result, extract business fields via DOM scraping
- *  5. Optionally click into each result to fetch phone + website (slower)
+ *  5. Enrich each lead by navigating directly to its Google Maps place URL
  *
  * Anti-bot:
- *  - Stealth: realistic user-agent, viewport, locale, timezone
- *  - Random delays between scrolls and between clicks
+ *  - Patchright patches Runtime.enable leak + Console.enable leak
+ *  - Realistic user-agent, viewport, locale, timezone
+ *  - Random delays between scrolls and between navigations
  *  - Optional proxy rotation (one proxy per browser context)
  *  - If Google shows a captcha / "unusual traffic", abort and report
+ *
+ * Leads are saved to DB immediately as they're enriched (via onLead callback).
+ * This means partial results are preserved even if the job is cancelled or
+ * the worker crashes.
  */
 
 import { chromium, type Browser, type BrowserContext, type Page } from 'patchright'
@@ -24,6 +29,7 @@ export interface ScrapedLead {
   address?: string
   phone?: string
   website?: string
+  placeUrl?: string
   category?: string
   rating?: number
   reviewsCount?: number
@@ -43,11 +49,12 @@ export interface ScrapeOptions {
   location: string
   maxResults: number
   proxyRotator?: ProxyRotator
-  // Slow path: open each result panel to fetch phone + website. ~3s per result.
-  deepScrape?: boolean
-  onProgress?: (count: number, total: number) => void
+  onProgress?: (phase: 'collect' | 'enrich', count: number, total: number) => void
+  onLead?: (lead: ScrapedLead) => void  // Called immediately when a lead is ready
   shouldCancel?: () => boolean
+  shouldPause?: () => boolean
   headless?: boolean
+  concurrency?: number  // Number of leads to enrich in parallel (default: 3)
 }
 
 export interface ScrapeResult {
@@ -69,10 +76,12 @@ export async function scrapeGoogleMaps(opts: ScrapeOptions): Promise<ScrapeResul
     location,
     maxResults,
     proxyRotator,
-    deepScrape = true,
     onProgress,
+    onLead,
     shouldCancel,
+    shouldPause,
     headless = true,
+    concurrency = 3,
   } = opts
 
   if (!query || !location) {
@@ -115,7 +124,7 @@ export async function scrapeGoogleMaps(opts: ScrapeOptions): Promise<ScrapeResul
         : {}),
     })
 
-    // Force Google cookies to English/US — prevents Chinese category names like 牙醫
+    // Force Google cookies to English/US
     await context.addCookies([
       {
         name: 'goog-lr',
@@ -128,7 +137,6 @@ export async function scrapeGoogleMaps(opts: ScrapeOptions): Promise<ScrapeResul
     // Hide webdriver flag
     await context.addInitScript(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => false })
-      // Overwrite the `plugins` and `languages` properties.
       Object.defineProperty(navigator, 'plugins', {
         get: () => [1, 2, 3, 4, 5],
       })
@@ -147,8 +155,7 @@ export async function scrapeGoogleMaps(opts: ScrapeOptions): Promise<ScrapeResul
 
     try {
       await page.goto(searchUrl, { waitUntil: 'domcontentloaded' })
-    } catch (e) {
-      // Retry once with longer timeout
+    } catch {
       await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 90_000 }).catch(() => {})
     }
 
@@ -168,7 +175,6 @@ export async function scrapeGoogleMaps(opts: ScrapeOptions): Promise<ScrapeResul
     try {
       await page.waitForSelector(feedSelector, { timeout: 30_000 })
     } catch {
-      // Maybe blocked — check for captcha
       const bodyText = await page.content()
       if (/unusual traffic|captcha|detected unusual/i.test(bodyText)) {
         return {
@@ -180,38 +186,68 @@ export async function scrapeGoogleMaps(opts: ScrapeOptions): Promise<ScrapeResul
       return { leads: [], error: 'Google Maps results feed did not load' }
     }
 
-    // Auto-scroll the feed until we have maxResults or no new results
-    const leads = await scrollAndCollect(page, {
+    // Phase 1: Scroll and collect all lead cards (with basic data)
+    const collectedLeads = await scrollAndCollect(page, {
       maxResults,
-      onProgress,
+      onProgress: (count) => onProgress?.('collect', count, maxResults),
       shouldCancel,
+      shouldPause,
     })
 
-    if (deepScrape && leads.length > 0) {
-      onProgress?.(0, leads.length)
-      for (let i = 0; i < leads.length; i++) {
+    // Save each collected lead immediately (even without enrichment)
+    // so partial results are preserved if the job is cancelled
+    for (const lead of collectedLeads) {
+      onLead?.(lead)
+    }
+
+    // Phase 2: Enrich leads in parallel (navigate to each place's URL for phone/website/address)
+    if (collectedLeads.length > 0) {
+      onProgress?.('enrich', 0, collectedLeads.length)
+      let enrichedCount = 0
+
+      // Process in batches of `concurrency` to avoid opening too many tabs
+      for (let i = 0; i < collectedLeads.length; i += concurrency) {
         if (shouldCancel?.()) break
-        // Skip if we already have both phone + website from the card
-        if (leads[i].phone && leads[i].website) {
-          onProgress?.(i + 1, leads.length)
-          continue
+
+        // Check for pause
+        while (shouldPause?.()) {
+          await sleep(2000)
+          if (shouldCancel?.()) break
         }
-        try {
-          // Add a per-lead timeout so one hanging card doesn't block the whole job
-          await Promise.race([
-            enrichLead(page, i, leads[i]),
-            new Promise((resolve) => setTimeout(resolve, 15_000)), // 15s max per lead
-          ])
-        } catch (e) {
-          // ignore individual failures
+        if (shouldCancel?.()) break
+
+        const batch = collectedLeads.slice(i, i + concurrency)
+        const batchResults = await Promise.allSettled(
+          batch.map(async (lead) => {
+            // Skip if already has phone + website from card
+            if (lead.phone && lead.website && lead.address) {
+              return lead
+            }
+            try {
+              await enrichLead(context, lead)
+              return lead
+            } catch {
+              return lead
+            }
+          })
+        )
+
+        // Re-save enriched leads
+        for (const result of batchResults) {
+          if (result.status === 'fulfilled') {
+            onLead?.(result.value)
+          }
+          enrichedCount++
+          onProgress?.('enrich', enrichedCount, collectedLeads.length)
         }
-        onProgress?.(i + 1, leads.length)
-        await sleep(jitter(400, 800))
+
+        // Small delay between batches
+        await sleep(jitter(300, 600))
       }
     }
 
     await context.close()
-    return { leads }
+    return { leads: collectedLeads }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     return { leads: [], error: msg }
@@ -222,23 +258,31 @@ export async function scrapeGoogleMaps(opts: ScrapeOptions): Promise<ScrapeResul
 
 /**
  * Scroll the Google Maps results feed and collect business entries.
- * Uses robust selectors based on aria roles, not brittle XPaths.
  */
 async function scrollAndCollect(
   page: Page,
-  opts: { maxResults: number; onProgress?: (n: number, total: number) => void; shouldCancel?: () => boolean }
+  opts: {
+    maxResults: number
+    onProgress?: (n: number) => void
+    shouldCancel?: () => boolean
+    shouldPause?: () => boolean
+  }
 ): Promise<ScrapedLead[]> {
   const leads: ScrapedLead[] = []
   const seenPlaceIds = new Set<string>()
   let stableCount = 0
-  const maxStableIterations = 6 // give up after 6 scrolls with no new results
+  const maxStableIterations = 6
 
   const feed = page.locator('[role="feed"]').first()
 
   for (let iter = 0; iter < 200 && leads.length < opts.maxResults; iter++) {
     if (opts.shouldCancel?.()) break
+    while (opts.shouldPause?.()) {
+      await sleep(2000)
+      if (opts.shouldCancel?.()) break
+    }
+    if (opts.shouldCancel?.()) break
 
-    // Extract current visible results
     const newLeads = await extractLeadsFromFeed(page, Array.from(seenPlaceIds))
     for (const lead of newLeads) {
       if (leads.length >= opts.maxResults) break
@@ -246,7 +290,7 @@ async function scrollAndCollect(
       seenPlaceIds.add(lead.placeId)
     }
 
-    opts.onProgress?.(leads.length, opts.maxResults)
+    opts.onProgress?.(leads.length)
 
     if (newLeads.length === 0) {
       stableCount++
@@ -255,13 +299,11 @@ async function scrollAndCollect(
       stableCount = 0
     }
 
-    // Scroll feed down
     try {
       await feed.evaluate((el: HTMLElement) => {
         el.scrollBy({ top: el.clientHeight * 2, behavior: 'smooth' })
       })
     } catch {
-      // Some Google Maps versions render the feed differently — try scrolling window
       await page.evaluate(() => window.scrollBy(0, window.innerHeight))
     }
 
@@ -273,15 +315,11 @@ async function scrollAndCollect(
 
 /**
  * Extract leads from the currently-visible Google Maps results feed.
- * Each result is an `<a role="article">` or similar — we look for the link to the
- * place and parse the visible card text.
  */
 async function extractLeadsFromFeed(
   page: Page,
   seenPlaceIds: string[]
 ): Promise<ScrapedLead[]> {
-  // Google Maps renders each result as an `<a>` with role="article" inside the feed.
-  // We extract data via DOM evaluation for speed.
   return await page.evaluate(
     (seen) => {
       const results: any[] = []
@@ -301,7 +339,6 @@ async function extractLeadsFromFeed(
         // Place ID + detail URL: from the href of the anchor
         const anchor = el.tagName === 'A' ? el : el.querySelector('a')
         const href = anchor?.getAttribute('href') || ''
-        // Store the full href for later deep-scrape (navigate directly to place page)
         const detailUrl = href.startsWith('http') ? href : (href ? `https://www.google.com${href}` : '')
         let placeId = ''
         const cidMatch = href.match(/0x[0-9a-f]+:0x[0-9a-f]+/)
@@ -311,19 +348,10 @@ async function extractLeadsFromFeed(
           if (coordMatch) placeId = `coord:${coordMatch[1]},${coordMatch[2]}`
         }
         if (!placeId) {
-          // Stable fallback: hash of business name + first 3 lines of text
-          // (avoids "Open 24 hours" / "Closes 9 PM" volatility causing dupes)
           const stableText = [businessName, ...lines.slice(1, 4)].join('|')
           placeId = `name:${stableText.slice(0, 120)}`
         }
         if (seen.includes(placeId)) return
-
-        // Parse the visible card text — Google Maps cards have a predictable format:
-        // Line 1: Business Name
-        // Line 2: ★ rating (reviews) · Category · Price
-        // Line 3: Address
-        // Sometimes followed by "Open 24 hours", "Closes 9 PM", etc.
-        // (lines + businessName already extracted above)
 
         let rating: number | undefined
         let reviewsCount: number | undefined
@@ -341,7 +369,6 @@ async function extractLeadsFromFeed(
           }
           if (/·/.test(line)) {
             const parts = line.split('·').map((p) => p.trim())
-            // First part might be "★ 4.5 (123)" or just rating
             for (const part of parts) {
               const r = part.match(/^(\d\.\d)\s*\(?(\d[\d,]*)\)?/)
               if (r && rating === undefined) {
@@ -359,16 +386,13 @@ async function extractLeadsFromFeed(
             businessStatus = line
             continue
           }
-          // Address lines usually contain a street number or city/state/zip
           if (/\d+\s+[A-Z]/.test(line) || /\b[A-Z]{2}\s+\d{5}\b/.test(line)) {
             if (!address) address = line
           }
         }
 
-        // Extract coordinates from any embedded data
         let lat: number | undefined
         let lng: number | undefined
-        // Look for data in the card's data attributes or innerHTML
         const innerHtml = el.innerHTML
         const coordMatch = innerHtml.match(/(-?\d{1,3}\.\d{4,}),\s*(-?\d{1,3}\.\d{4,})/)
         if (coordMatch) {
@@ -376,10 +400,8 @@ async function extractLeadsFromFeed(
           lng = parseFloat(coordMatch[2])
         }
 
-        // Try to extract phone + website from the card itself (faster than deep-scrape)
+        // Try to extract phone from the card itself
         let phone: string | undefined
-        let website: string | undefined
-        // Phone: look for tel: links or data-item-id="phone:..." within the card
         const phoneEl = el.querySelector('[data-item-id^="phone:"]') as HTMLElement | null
         if (phoneEl) {
           const raw = phoneEl.getAttribute('data-item-id') || ''
@@ -393,14 +415,16 @@ async function extractLeadsFromFeed(
             phone = usMatch ? `+1 ${usMatch[1]}-${usMatch[2]}-${usMatch[3]}` : digits
           }
         }
-        // Website: look for data-item-id="authority" within the card
+
+        // Try to extract website from the card itself
+        let website: string | undefined
         const websiteEl = el.querySelector('[data-item-id="authority"]') as HTMLElement | null
         if (websiteEl) {
-          let href = websiteEl.getAttribute('href') || ''
-          if (href.startsWith('/url?q=')) {
-            href = new URL(href, location.origin).searchParams.get('q') || href
+          let url = websiteEl.getAttribute('href') || ''
+          if (url.startsWith('/url?q=')) {
+            url = new URL(url, location.origin).searchParams.get('q') || url
           }
-          website = href || undefined
+          website = url || undefined
         }
 
         results.push({
@@ -417,90 +441,85 @@ async function extractLeadsFromFeed(
           lat,
           lng,
           detailUrl,
+          placeUrl: detailUrl,
         })
       })
       return results
     },
-    Array.from(seenPlaceIds)
+    seenPlaceIds
   )
 }
 
 /**
  * Navigate directly to the place's Google Maps URL to open its detail page,
- * then extract phone + website + address. This is more reliable than clicking
- * cards in the feed (which virtualizes and causes mismatches).
+ * then extract phone + website + address. Uses a new page (tab) so the
+ * main feed page is preserved for concurrent enrichment.
  */
-async function enrichLead(page: Page, _index: number, lead: ScrapedLead): Promise<void> {
+async function enrichLead(context: BrowserContext, lead: ScrapedLead): Promise<void> {
   if (!lead.detailUrl) return
 
-  // Navigate directly to the place's URL
+  const page = await context.newPage()
   try {
     await page.goto(lead.detailUrl, { waitUntil: 'domcontentloaded', timeout: 15_000 })
-  } catch {
-    return
-  }
-  await sleep(jitter(1500, 2500))
+    await sleep(jitter(1500, 2500))
 
-  // Wait for the detail panel to load
-  try {
-    await page.waitForSelector('[data-item-id^="phone:"], [data-item-id="authority"], [data-item-id="address"]', { timeout: 8_000 }).catch(() => {})
-  } catch {
-    // ignore
-  }
+    // Wait for detail panel elements
+    await page
+      .waitForSelector('[data-item-id^="phone:"], [data-item-id="authority"], [data-item-id="address"]', { timeout: 8_000 })
+      .catch(() => {})
 
-  // Extract from detail page
-  const detail = await page.evaluate(() => {
-    let phone: string | undefined
-    let website: string | undefined
-    let address: string | undefined
+    const detail = await page.evaluate(() => {
+      let phone: string | undefined
+      let website: string | undefined
+      let address: string | undefined
 
-    // Phone
-    const phoneEl = document.querySelector('[data-item-id^="phone:"]') as HTMLElement | null
-    if (phoneEl) {
-      const raw = phoneEl.getAttribute('data-item-id') || ''
-      // Attribute format is "phone:+13012319100" — strip prefix
-      let digits = raw.replace(/^phone:/, '').trim()
-      // If attribute is empty, fall back to innerText (which may be "tel:+1...")
-      if (!digits) {
-        digits = (phoneEl.innerText || '').trim().replace(/^tel:/, '').trim()
+      // Phone
+      const phoneEl = document.querySelector('[data-item-id^="phone:"]') as HTMLElement | null
+      if (phoneEl) {
+        const raw = phoneEl.getAttribute('data-item-id') || ''
+        let digits = raw.replace(/^phone:/, '').trim()
+        if (!digits) {
+          digits = (phoneEl.innerText || '').trim().replace(/^tel:/, '').trim()
+        }
+        digits = digits.replace(/^tel:/, '').trim()
+        if (digits) {
+          const usMatch = digits.match(/^\+?1?(\d{3})(\d{3})(\d{4})$/)
+          phone = usMatch ? `+1 ${usMatch[1]}-${usMatch[2]}-${usMatch[3]}` : digits
+        }
       }
-      // Also handle case where digits starts with "tel:"
-      digits = digits.replace(/^tel:/, '').trim()
-      if (digits) {
-        const usMatch = digits.match(/^\+?1?(\d{3})(\d{3})(\d{4})$/)
-        phone = usMatch ? `+1 ${usMatch[1]}-${usMatch[2]}-${usMatch[3]}` : digits
+
+      // Website
+      const websiteEl = document.querySelector('[data-item-id="authority"]') as HTMLElement | null
+      if (websiteEl) {
+        let href = websiteEl.getAttribute('href') || ''
+        if (href.startsWith('/url?q=')) {
+          href = new URL(href, location.origin).searchParams.get('q') || href
+        }
+        website = href || undefined
       }
-    }
 
-    // Website
-    const websiteEl = document.querySelector('[data-item-id="authority"]') as HTMLElement | null
-    if (websiteEl) {
-      let href = websiteEl.getAttribute('href') || ''
-      if (href.startsWith('/url?q=')) {
-        href = new URL(href, location.origin).searchParams.get('q') || href
+      // Address
+      const addrEl = document.querySelector('[data-item-id="address"]') as HTMLElement | null
+      if (addrEl) {
+        address = addrEl.innerText?.trim()
       }
-      website = href || undefined
+
+      return { phone, website, address }
+    })
+
+    if (detail.phone && !lead.phone) lead.phone = detail.phone
+    if (detail.website && !lead.website) lead.website = detail.website
+    if (detail.address && !lead.address) lead.address = detail.address
+
+    // Parse city/state/zip from address
+    if (detail.address) {
+      const parsed = parseAddress(detail.address)
+      if (parsed.city) lead.city = parsed.city
+      if (parsed.state) lead.state = parsed.state
+      if (parsed.zip) lead.zip = parsed.zip
     }
-
-    // Address
-    const addrEl = document.querySelector('[data-item-id="address"]') as HTMLElement | null
-    if (addrEl) {
-      address = addrEl.innerText?.trim()
-    }
-
-    return { phone, website, address }
-  })
-
-  if (detail.phone && !lead.phone) lead.phone = detail.phone
-  if (detail.website && !lead.website) lead.website = detail.website
-  if (detail.address && !lead.address) lead.address = detail.address
-
-  // Parse city/state/zip from address
-  if (detail.address) {
-    const parsed = parseAddress(detail.address)
-    if (parsed.city) lead.city = parsed.city
-    if (parsed.state) lead.state = parsed.state
-    if (parsed.zip) lead.zip = parsed.zip
+  } finally {
+    await page.close().catch(() => {})
   }
 }
 
@@ -513,7 +532,6 @@ interface ParsedAddress {
 
 export function parseAddress(address: string): ParsedAddress {
   const result: ParsedAddress = {}
-  // US: "123 Main St, Rockville, MD 20850"
   const us = address.match(/,\s*([^,]+),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)/)
   if (us) {
     result.city = us[1].trim()
@@ -521,7 +539,6 @@ export function parseAddress(address: string): ParsedAddress {
     result.zip = us[3]
     result.country = 'US'
   }
-  // Just state + zip
   const stateZip = address.match(/\b([A-Z]{2})\s+(\d{5}(?:-\d{4})?)\b/)
   if (stateZip && !result.state) {
     result.state = stateZip[1]

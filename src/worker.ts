@@ -57,7 +57,7 @@ async function pollOnce(): Promise<boolean> {
     // Recover stale jobs every poll cycle (cheap query)
     await recoverStaleJobs()
 
-    // Find the oldest queued job
+    // Find the oldest queued job (paused jobs stay paused — user resumes manually)
     const queuedJob = await db.searchJob.findFirst({
       where: { status: 'queued' },
       orderBy: { createdAt: 'asc' },

@@ -43,7 +43,7 @@ model SearchJob {
   query         String    // e.g. "dentists"
   location      String    // e.g. "Rockville MD"
   maxResults    Int       @default(200)
-  status        String    @default("queued") // queued | running | done | failed | cancelled
+  status        String    @default("queued") // queued | running | paused | done | failed | cancelled
   progress      Int       @default(0)        // 0-100
   leadsFound    Int       @default(0)
   noWebsiteCount Int      @default(0)
@@ -72,6 +72,7 @@ model Lead {
   country       String?
   phone         String?
   website       String?   // NULL = no website (prime target for cybershare.tech)
+  placeUrl      String?   // Google Maps URL for this place (so user can open the source page)
   category      String?
   rating        Float?
   reviewsCount  Int?

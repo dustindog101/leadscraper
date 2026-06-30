@@ -65,6 +65,7 @@ export async function POST(req: Request) {
       phone: l.phone || '',
       website: l.website || '',
       hasWebsite: l.website ? 'yes' : 'NO',
+      placeUrl: l.placeUrl || '',
       address: l.address || '',
       city: l.city || '',
       state: l.state || '',
