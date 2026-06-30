@@ -383,7 +383,11 @@ async function extractLeadsFromFeed(
         const phoneEl = el.querySelector('[data-item-id^="phone:"]') as HTMLElement | null
         if (phoneEl) {
           const raw = phoneEl.getAttribute('data-item-id') || ''
-          const digits = raw.replace(/^phone:/, '').trim()
+          let digits = raw.replace(/^phone:/, '').trim()
+          if (!digits) {
+            digits = (phoneEl.innerText || '').trim().replace(/^tel:/, '').trim()
+          }
+          digits = digits.replace(/^tel:/, '').trim()
           if (digits) {
             const usMatch = digits.match(/^\+?1?(\d{3})(\d{3})(\d{4})$/)
             phone = usMatch ? `+1 ${usMatch[1]}-${usMatch[2]}-${usMatch[3]}` : digits
@@ -454,12 +458,18 @@ async function enrichLead(page: Page, _index: number, lead: ScrapedLead): Promis
     const phoneEl = document.querySelector('[data-item-id^="phone:"]') as HTMLElement | null
     if (phoneEl) {
       const raw = phoneEl.getAttribute('data-item-id') || ''
-      const digits = raw.replace(/^phone:/, '').trim()
+      // Attribute format is "phone:+13012319100" — strip prefix
+      let digits = raw.replace(/^phone:/, '').trim()
+      // If attribute is empty, fall back to innerText (which may be "tel:+1...")
+      if (!digits) {
+        digits = (phoneEl.innerText || '').trim().replace(/^tel:/, '').trim()
+      }
+      // Also handle case where digits starts with "tel:"
+      digits = digits.replace(/^tel:/, '').trim()
       if (digits) {
         const usMatch = digits.match(/^\+?1?(\d{3})(\d{3})(\d{4})$/)
         phone = usMatch ? `+1 ${usMatch[1]}-${usMatch[2]}-${usMatch[3]}` : digits
       }
-      if (!phone) phone = phoneEl.innerText?.trim()
     }
 
     // Website
