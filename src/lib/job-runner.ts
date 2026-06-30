@@ -46,8 +46,17 @@ export async function runSearchJob(jobId: string): Promise<void> {
 
   // Track which leads we've already saved (to avoid duplicate writes on re-save)
   const savedLeadIds = new Set<string>()
-  let noWebsiteCount = 0
+  const leadHasWebsite = new Map<string, boolean>() // placeId → has website
   let totalSaved = 0
+
+  // Calculate no-website count from the tracked leads
+  function getNoWebsiteCount(): number {
+    let count = 0
+    for (const hasWebsite of leadHasWebsite.values()) {
+      if (!hasWebsite) count++
+    }
+    return count
+  }
 
   // Save a lead to the DB immediately (upsert by placeId)
   async function saveLead(lead: ScrapedLead) {
@@ -74,6 +83,8 @@ export async function runSearchJob(jobId: string): Promise<void> {
             updatedAt: new Date(),
           },
         })
+        // Update tracking — website may have been added during enrichment
+        leadHasWebsite.set(lead.placeId, !!lead.website)
       } catch {
         // ignore individual update errors
       }
@@ -81,6 +92,7 @@ export async function runSearchJob(jobId: string): Promise<void> {
     }
 
     savedLeadIds.add(lead.placeId)
+    leadHasWebsite.set(lead.placeId, !!lead.website)
 
     try {
       await db.lead.upsert({
@@ -108,10 +120,6 @@ export async function runSearchJob(jobId: string): Promise<void> {
         update: {},
       })
       totalSaved++
-      if (!lead.website) noWebsiteCount++
-
-      // Update job progress + lead count in DB (throttled — don't write on every lead)
-      // We'll update the count periodically via the progress callback
     } catch (e) {
       // skip individual write errors
     }
@@ -143,10 +151,10 @@ export async function runSearchJob(jobId: string): Promise<void> {
       shouldPause: () => paused,
       onLead: async (lead) => {
         await saveLead(lead)
-        // Update job leadsFound count
+        // Update job leadsFound count (noWebsiteCount is now calculated dynamically)
         await db.searchJob.update({
           where: { id: jobId },
-          data: { leadsFound: totalSaved, noWebsiteCount },
+          data: { leadsFound: totalSaved, noWebsiteCount: getNoWebsiteCount() },
         }).catch(() => {})
       },
       onProgress: async (phase, count, total) => {
@@ -161,7 +169,7 @@ export async function runSearchJob(jobId: string): Promise<void> {
         }
         await db.searchJob.update({
           where: { id: jobId },
-          data: { progress: pct, leadsFound: totalSaved, noWebsiteCount },
+          data: { progress: pct, leadsFound: totalSaved, noWebsiteCount: getNoWebsiteCount() },
         }).catch(() => {})
       },
     })
@@ -188,14 +196,14 @@ export async function runSearchJob(jobId: string): Promise<void> {
         status: cancelled ? 'cancelled' : 'done',
         progress: 100,
         leadsFound: totalSaved,
-        noWebsiteCount,
+        noWebsiteCount: getNoWebsiteCount(),
         errorMsg: result.error,
         finishedAt: new Date(),
       },
     })
 
     console.log(
-      `[scraper] job ${jobId} ${cancelled ? 'cancelled' : 'done'} — ${totalSaved} leads (${noWebsiteCount} without website)`
+      `[scraper] job ${jobId} ${cancelled ? 'cancelled' : 'done'} — ${totalSaved} leads (${getNoWebsiteCount()} without website)`
     )
   } catch (e) {
     clearInterval(statusPoll)
