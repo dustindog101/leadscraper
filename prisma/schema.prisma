@@ -1,0 +1,131 @@
+// Lead Scraper schema for cybershare.tech
+// SQLite now; swap to Postgres/Supabase later by changing `provider` and `url`.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  name          String?
+  passwordHash  String
+  role          String    @default("member") // "admin" | "member"
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  searchJobs    SearchJob[]
+  leadsTagged   LeadTag[]
+}
+
+model SearchJob {
+  id            String    @id @default(cuid())
+  query         String    // e.g. "dentists"
+  location      String    // e.g. "Rockville MD"
+  maxResults    Int       @default(200)
+  status        String    @default("queued") // queued | running | done | failed | cancelled
+  progress      Int       @default(0)        // 0-100
+  leadsFound    Int       @default(0)
+  noWebsiteCount Int      @default(0)
+  errorMsg      String?
+  useProxy      Boolean   @default(false)
+  proxyConfigId String?
+  proxyConfig   ProxyConfig? @relation(fields: [proxyConfigId], references: [id], onDelete: SetNull)
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  startedAt     DateTime?
+  finishedAt    DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  leads         Lead[]
+}
+
+model Lead {
+  id            String    @id @default(cuid())
+  placeId       String    @unique // Google Maps place ID (cid or stable identifier)
+  businessName  String
+  address       String?
+  city          String?
+  state         String?
+  zip           String?
+  country       String?
+  phone         String?
+  website       String?   // NULL = no website (prime target for cybershare.tech)
+  category      String?
+  rating        Float?
+  reviewsCount  Int?
+  priceLevel    String?
+  lat           Float?
+  lng           Float?
+  businessStatus String?  // operational, closed, etc.
+  sourceJobId   String?
+  sourceJob     SearchJob? @relation(fields: [sourceJobId], references: [id], onDelete: SetNull)
+  discoveredAt  DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  contacts      LeadContact[]
+  tags          LeadTag[]
+
+  @@index([city])
+  @@index([state])
+  @@index([category])
+  @@index([website])
+  @@index([discoveredAt])
+}
+
+model LeadContact {
+  id        String   @id @default(cuid())
+  leadId    String
+  lead      Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  name      String
+  title     String?
+  email     String?
+  confidence Float  @default(0.5) // 0-1
+  source    String  // "website-meta" | "website-about" | "llm" | "manual"
+  verified  Boolean @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([leadId])
+}
+
+model Tag {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  color     String   @default("default")
+  createdAt DateTime @default(now())
+
+  leads     LeadTag[]
+}
+
+model LeadTag {
+  leadId    String
+  lead      Lead   @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  tagId     String
+  tag       Tag    @relation(fields: [tagId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@id([leadId, tagId, userId])
+}
+
+model ProxyConfig {
+  id          String   @id @default(cuid())
+  name        String
+  type        String   // "http" | "socks5" | "none"
+  // Single proxy: stored as "host:port:user:pass" (user:pass optional)
+  // Multiple proxies: stored newline-separated
+  proxies     String   // newline-separated list of proxy URLs
+  rotateMode  String   @default("round-robin") // "round-robin" | "random"
+  enabled     Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  searchJobs  SearchJob[]
+}

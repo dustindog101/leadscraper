@@ -1,0 +1,82 @@
+import { NextResponse } from 'next/server'
+import { getServerSession } from 'next-auth'
+import { authOptions } from '@/lib/auth'
+import { db } from '@/lib/db'
+import { runSearchJob } from '@/lib/job-runner'
+
+// POST /api/jobs — create a new scrape job
+export async function POST(req: Request) {
+  const session = await getServerSession(authOptions)
+  if (!session?.user) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  const body = await req.json().catch(() => ({}))
+  const { query, location, maxResults, useProxy, proxyConfigId } = body as {
+    query?: string
+    location?: string
+    maxResults?: number
+    useProxy?: boolean
+    proxyConfigId?: string
+  }
+
+  if (!query || !location) {
+    return NextResponse.json(
+      { error: 'query and location are required' },
+      { status: 400 }
+    )
+  }
+
+  const cappedMax = Math.min(Math.max(10, Number(maxResults) || 200), 2000)
+
+  // If proxy requested, validate config exists
+  if (useProxy && proxyConfigId) {
+    const cfg = await db.proxyConfig.findUnique({ where: { id: proxyConfigId } })
+    if (!cfg) {
+      return NextResponse.json({ error: 'Proxy config not found' }, { status: 400 })
+    }
+  }
+
+  const job = await db.searchJob.create({
+    data: {
+      query: query.trim(),
+      location: location.trim(),
+      maxResults: cappedMax,
+      useProxy: !!useProxy,
+      proxyConfigId: useProxy ? proxyConfigId : null,
+      userId: session.user.id,
+      status: 'queued',
+    },
+  })
+
+  // Fire and forget — long-running background task.
+  // On local laptop this runs in the Next.js process. On Vercel this would
+  // hit the 300s function timeout — for production, move this to Inngest +
+  // a Railway worker (see TODO in job-runner.ts).
+  runSearchJob(job.id).catch((e) => {
+    console.error(`[jobs] runSearchJob failed for ${job.id}:`, e)
+  })
+
+  return NextResponse.json({ job }, { status: 201 })
+}
+
+// GET /api/jobs — list jobs for current user
+export async function GET(req: Request) {
+  const session = await getServerSession(authOptions)
+  if (!session?.user) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+
+  const url = new URL(req.url)
+  const limit = Math.min(50, Number(url.searchParams.get('limit')) || 20)
+
+  const jobs = await db.searchJob.findMany({
+    orderBy: { createdAt: 'desc' },
+    take: limit,
+    include: {
+      user: { select: { id: true, name: true, email: true } },
+    },
+  })
+
+  return NextResponse.json({ jobs })
+}
