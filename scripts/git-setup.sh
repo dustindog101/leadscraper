@@ -20,8 +20,10 @@ if [[ -z "${GITHUB_TOKEN:-}" ]]; then
 fi
 
 echo "=== Configuring git ==="
-git config user.name "Manny"
-git config user.email "manny@cybershare.tech"
+GIT_USER_NAME="${GIT_USER_NAME:-Manny}"
+GIT_USER_EMAIL="${GIT_USER_EMAIL:-manny@cybershare.tech}"
+git config user.name "$GIT_USER_NAME"
+git config user.email "$GIT_USER_EMAIL"
 
 echo "=== Setting remote URL with token auth ==="
 git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/dustindog101/leadscraper.git" 2>/dev/null || \
