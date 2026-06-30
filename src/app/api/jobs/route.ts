@@ -2,7 +2,6 @@ import { NextResponse } from 'next/server'
 import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
 import { db } from '@/lib/db'
-import { runSearchJob } from '@/lib/job-runner'
 
 // POST /api/jobs — create a new scrape job
 export async function POST(req: Request) {
@@ -49,13 +48,21 @@ export async function POST(req: Request) {
     },
   })
 
-  // Fire and forget — long-running background task.
-  // On local laptop this runs in the Next.js process. On Vercel this would
-  // hit the 300s function timeout — for production, move this to Inngest +
-  // a Railway worker (see TODO in job-runner.ts).
-  runSearchJob(job.id).catch((e) => {
-    console.error(`[jobs] runSearchJob failed for ${job.id}:`, e)
-  })
+  // In local dev (or self-hosted), run the scraper inline in the API route.
+  // In production on Vercel, the worker (Railway/Render) polls the DB for
+  // queued jobs and runs them — Vercel functions time out at 300s and
+  // can't run Playwright.
+  //
+  // We detect "local mode" via the presence of a RUN_WORKER_INLINE env var
+  // OR the absence of VERCEL env var.
+  const isLocal = !process.env.VERCEL && process.env.RUN_WORKER_INLINE !== 'false'
+
+  if (isLocal) {
+    const { runSearchJob } = await import('@/lib/job-runner')
+    runSearchJob(job.id).catch((e) => {
+      console.error(`[jobs] runSearchJob failed for ${job.id}:`, e)
+    })
+  }
 
   return NextResponse.json({ job }, { status: 201 })
 }

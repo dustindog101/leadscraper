@@ -120,6 +120,8 @@ Built for [cybershare.tech](https://cybershare.tech) to find SMBs that need a we
 - Node.js 20+ or [Bun](https://bun.sh) 1.3+
 - ~500MB free disk (for Playwright Chromium)
 
+> **Want to deploy this online?** See **[HOSTING.md](HOSTING.md)** for a step-by-step guide to deploy free on Vercel + Neon + Railway.
+
 ### Install
 
 ```bash
@@ -399,5 +401,3 @@ This project stands on the shoulders of giants. The scraper architecture was inf
 **Built with ❤️ for [cybershare.tech](https://cybershare.tech)**
 
 </div>
-<!-- test: auto-commit watcher is live -->
-<!-- test: auto-commit watcher is live -->
