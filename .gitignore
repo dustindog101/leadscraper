@@ -67,3 +67,5 @@ server.log
 /agent-ctx/
 /worklog.md
 *.pid
+/scripts/.proxies.local.txt
+/scripts/.secrets.*
