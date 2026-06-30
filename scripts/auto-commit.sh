@@ -37,6 +37,12 @@ echo "[auto-commit] remote: ${REPO_URL}"
 # Make sure we're on main
 git branch --show-current 2>/dev/null | grep -q main || git branch -M main
 
+# Make sure git identity is set (use GitHub noreply email to avoid publish-private-email errors)
+if [[ -z "$(git config user.email)" ]]; then
+  git config user.name "dustindog101"
+  git config user.email "56493866+dustindog101@users.noreply.github.com"
+fi
+
 LAST_HASH=$(git rev-parse HEAD 2>/dev/null || echo "none")
 
 while true; do

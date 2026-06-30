@@ -20,8 +20,10 @@ if [[ -z "${GITHUB_TOKEN:-}" ]]; then
 fi
 
 echo "=== Configuring git ==="
-GIT_USER_NAME="${GIT_USER_NAME:-Manny}"
-GIT_USER_EMAIL="${GIT_USER_EMAIL:-manny@cybershare.tech}"
+# Use GitHub noreply email by default to avoid "publish private email" errors
+# Format: {user_id}+{username}@users.noreply.github.com
+GIT_USER_NAME="${GIT_USER_NAME:-dustindog101}"
+GIT_USER_EMAIL="${GIT_USER_EMAIL:-56493866+dustindog101@users.noreply.github.com}"
 git config user.name "$GIT_USER_NAME"
 git config user.email "$GIT_USER_EMAIL"
 
