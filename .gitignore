@@ -69,3 +69,4 @@ server.log
 *.pid
 /scripts/.proxies.local.txt
 /scripts/.secrets.*
+/auto-commit.log
