@@ -1,0 +1,10 @@
+[build]
+dockerfile = "Dockerfile"
+
+[deploy]
+# Railway worker doesn't need a port — it polls the DB
+# But Railway requires a healthcheck, so we expose a simple HTTP server
+# Actually, the worker is a long-running process — Railway will keep it alive
+# as long as the process is running. No port needed.
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5
