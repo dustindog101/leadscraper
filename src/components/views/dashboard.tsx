@@ -13,6 +13,7 @@ import {
   LogOut,
   Menu,
   X,
+  Settings as SettingsIcon,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { StatsView } from '@/components/views/stats-view'
@@ -20,8 +21,9 @@ import { NewSearchView } from '@/components/views/new-search-view'
 import { LeadsView } from '@/components/views/leads-view'
 import { JobsView } from '@/components/views/jobs-view'
 import { ProxiesView } from '@/components/views/proxies-view'
+import { SettingsView } from '@/components/views/settings-view'
 
-type View = 'stats' | 'new-search' | 'leads' | 'jobs' | 'proxies'
+type View = 'stats' | 'new-search' | 'leads' | 'jobs' | 'proxies' | 'settings'
 
 interface DashboardProps {
   session: {
@@ -40,6 +42,7 @@ const NAV: { id: View; label: string; icon: React.ElementType }[] = [
   { id: 'leads', label: 'Leads', icon: Users },
   { id: 'jobs', label: 'Jobs', icon: Server },
   { id: 'proxies', label: 'Proxies', icon: Globe },
+  { id: 'settings', label: 'Settings', icon: SettingsIcon },
 ]
 
 export function Dashboard({ session }: DashboardProps) {
@@ -152,6 +155,7 @@ export function Dashboard({ session }: DashboardProps) {
           {view === 'leads' && <LeadsView />}
           {view === 'jobs' && <JobsView />}
           {view === 'proxies' && <ProxiesView />}
+          {view === 'settings' && <SettingsView session={session} />}
         </main>
       </div>
     </div>

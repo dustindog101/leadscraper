@@ -74,6 +74,14 @@ export interface ProxyConfig {
   proxiesPreview?: string[]
 }
 
+export interface User {
+  id: string
+  email: string
+  name?: string | null
+  role: string
+  createdAt: string
+}
+
 export interface Stats {
   totalLeads: number
   noWebsiteLeads: number
@@ -194,4 +202,35 @@ export const api = {
 
   // Tags
   deleteTag: (id: string) => fetchJson<{ ok: boolean }>(`/api/tags?id=${id}`, { method: 'DELETE' }),
+
+  // Auth / password management
+  changePassword: (currentPassword: string, newPassword: string) =>
+    fetchJson<{ ok: boolean }>('/api/auth/change-password', {
+      method: 'POST',
+      body: JSON.stringify({ currentPassword, newPassword }),
+    }),
+
+  requestReset: (email: string) =>
+    fetchJson<{ ok: boolean; resetUrl?: string; message?: string }>('/api/auth/request-reset', {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    }),
+
+  resetPassword: (token: string, newPassword: string) =>
+    fetchJson<{ ok: boolean }>('/api/auth/reset-password', {
+      method: 'POST',
+      body: JSON.stringify({ token, newPassword }),
+    }),
+
+  // User management (admin)
+  listUsers: () => fetchJson<{ users: User[] }>('/api/users'),
+
+  updateUser: (id: string, data: { role?: string; name?: string; password?: string }) =>
+    fetchJson<{ user: User }>(`/api/users/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+
+  deleteUser: (id: string) =>
+    fetchJson<{ ok: boolean }>(`/api/users/${id}`, { method: 'DELETE' }),
 }

@@ -8,8 +8,12 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import {
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+} from '@/components/ui/dialog'
 import { toast } from 'sonner'
-import { Loader2, Globe } from 'lucide-react'
+import { Loader2, Globe, KeyRound, Copy, ExternalLink, CheckCircle2 } from 'lucide-react'
+import { api } from '@/lib/api/client'
 
 export function LoginScreen() {
   const router = useRouter()
@@ -24,12 +28,18 @@ export function LoginScreen() {
   const [signupEmail, setSignupEmail] = useState('')
   const [signupPassword, setSignupPassword] = useState('')
 
+  // Forgot password dialog
+  const [forgotOpen, setForgotOpen] = useState(false)
+  const [forgotEmail, setForgotEmail] = useState('')
+  const [forgotLoading, setForgotLoading] = useState(false)
+  const [resetUrl, setResetUrl] = useState<string | null>(null)
+
   async function handleSignIn(e: React.FormEvent) {
     e.preventDefault()
     setLoading(true)
     const res = await signIn('credentials', {
       email: signinEmail,
-      password: signupPassword || signinPassword,
+      password: signinPassword,
       redirect: false,
     })
     setLoading(false)
@@ -72,6 +82,37 @@ export function LoginScreen() {
       router.refresh()
     } finally {
       setLoading(false)
+    }
+  }
+
+  async function handleForgotPassword(e: React.FormEvent) {
+    e.preventDefault()
+    setForgotLoading(true)
+    try {
+      const data = await api.requestReset(forgotEmail)
+      if (data.resetUrl) {
+        setResetUrl(data.resetUrl)
+        toast.success('Reset link generated')
+      } else {
+        // Email doesn't exist — show generic success (prevent enumeration)
+        setResetUrl(null)
+        toast.success('If that email exists, a reset link has been generated.')
+        setTimeout(() => {
+          setForgotOpen(false)
+          setForgotEmail('')
+        }, 2000)
+      }
+    } catch (e: Error) {
+      toast.error(e.message)
+    } finally {
+      setForgotLoading(false)
+    }
+  }
+
+  function copyResetUrl() {
+    if (resetUrl) {
+      navigator.clipboard.writeText(resetUrl)
+      toast.success('Reset link copied to clipboard')
     }
   }
 
@@ -119,7 +160,20 @@ export function LoginScreen() {
                     />
                   </div>
                   <div className="space-y-1.5">
-                    <Label htmlFor="signin-password">Password</Label>
+                    <div className="flex items-center justify-between">
+                      <Label htmlFor="signin-password">Password</Label>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setForgotEmail(signinEmail)
+                          setResetUrl(null)
+                          setForgotOpen(true)
+                        }}
+                        className="text-xs text-primary hover:underline"
+                      >
+                        Forgot password?
+                      </button>
+                    </div>
                     <Input
                       id="signin-password"
                       type="password"
@@ -190,6 +244,79 @@ export function LoginScreen() {
           For cybershare.tech · Local dev build
         </p>
       </div>
+
+      {/* Forgot Password Dialog */}
+      <Dialog open={forgotOpen} onOpenChange={setForgotOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <KeyRound className="h-5 w-5" /> Reset Password
+            </DialogTitle>
+            <DialogDescription>
+              Enter your email and we&apos;ll generate a password reset link.
+              {' '}
+              <strong>Since this tool has no email setup, the link will be shown here.</strong>
+              {' '}
+              In production with email, it would be emailed to you.
+            </DialogDescription>
+          </DialogHeader>
+
+          {resetUrl ? (
+            <div className="space-y-3 py-2">
+              <div className="rounded-md bg-emerald-50 border border-emerald-200 p-3 flex items-start gap-2">
+                <CheckCircle2 className="h-4 w-4 text-emerald-600 mt-0.5 flex-shrink-0" />
+                <div className="text-sm">
+                  <p className="font-medium text-emerald-800">Reset link generated!</p>
+                  <p className="text-emerald-700 mt-0.5">
+                    Click the link below to set a new password. The link expires in 1 hour.
+                  </p>
+                </div>
+              </div>
+              <div className="rounded-md border bg-muted/40 p-2 font-mono text-xs break-all">
+                {resetUrl}
+              </div>
+              <div className="flex gap-2">
+                <Button onClick={copyResetUrl} variant="outline" className="flex-1">
+                  <Copy className="h-4 w-4 mr-2" /> Copy Link
+                </Button>
+                <Button
+                  onClick={() => {
+                    window.location.href = resetUrl
+                  }}
+                  className="flex-1"
+                >
+                  <ExternalLink className="h-4 w-4 mr-2" /> Open Reset Page
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <form onSubmit={handleForgotPassword} className="space-y-3 py-2">
+              <div className="space-y-1.5">
+                <Label htmlFor="forgot-email">Email</Label>
+                <Input
+                  id="forgot-email"
+                  type="email"
+                  placeholder="you@cybershare.tech"
+                  value={forgotEmail}
+                  onChange={(e) => setForgotEmail(e.target.value)}
+                  required
+                  autoComplete="email"
+                  autoFocus
+                />
+              </div>
+              <DialogFooter>
+                <Button type="button" variant="ghost" onClick={() => setForgotOpen(false)}>
+                  Cancel
+                </Button>
+                <Button type="submit" disabled={forgotLoading}>
+                  {forgotLoading ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+                  Generate Reset Link
+                </Button>
+              </DialogFooter>
+            </form>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

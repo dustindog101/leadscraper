@@ -15,7 +15,7 @@
  *  - If Google shows a captcha / "unusual traffic", abort and report
  */
 
-import { chromium, type Browser, type BrowserContext, type Page } from 'playwright'
+import { chromium, type Browser, type BrowserContext, type Page } from 'patchright'
 import { ProxyRotator, type ParsedProxy } from './proxy'
 
 export interface ScrapedLead {
