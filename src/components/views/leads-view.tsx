@@ -499,20 +499,48 @@ function LeadRow({
         </td>
         <td className="px-3 py-2.5">
           {hasNoWebsite ? (
-            <Badge variant="default" className="bg-amber-500 hover:bg-amber-600 text-white gap-1">
-              <AlertCircle className="h-3 w-3" /> No website
-            </Badge>
+            <div className="flex items-center gap-2">
+              <Badge variant="default" className="bg-amber-500 hover:bg-amber-600 text-white gap-1">
+                <AlertCircle className="h-3 w-3" /> No website
+              </Badge>
+              {lead.placeUrl && (
+                <a
+                  href={lead.placeUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                  className="inline-flex items-center text-xs text-muted-foreground hover:text-primary"
+                  title="Open in Google Maps"
+                >
+                  <MapPin className="h-3 w-3" />
+                </a>
+              )}
+            </div>
           ) : (
-            <a
-              href={lead.website!.startsWith('http') ? lead.website! : `https://${lead.website}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={(e) => e.stopPropagation()}
-              className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
-            >
-              <Globe className="h-3 w-3" /> Visit
-              <ExternalLink className="h-2.5 w-2.5" />
-            </a>
+            <div className="flex items-center gap-2">
+              <a
+                href={lead.website!.startsWith('http') ? lead.website! : `https://${lead.website}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(e) => e.stopPropagation()}
+                className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+              >
+                <Globe className="h-3 w-3" /> Visit
+                <ExternalLink className="h-2.5 w-2.5" />
+              </a>
+              {lead.placeUrl && (
+                <a
+                  href={lead.placeUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                  className="inline-flex items-center text-xs text-muted-foreground hover:text-primary"
+                  title="Open in Google Maps"
+                >
+                  <MapPin className="h-3 w-3" />
+                </a>
+              )}
+            </div>
           )}
         </td>
         <td className="px-2 text-muted-foreground">
@@ -646,7 +674,7 @@ function LeadRow({
                     Delete
                   </Button>
                   <div className="text-[10px] text-muted-foreground self-end">
-                    Discovered {new Date(lead.discoveredAt).toLocaleDateString()}
+                    Discovered {new Date(lead.discoveredAt).toLocaleString()}
                   </div>
                 </div>
               </div>

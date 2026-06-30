@@ -16,6 +16,7 @@ import {
   Settings as SettingsIcon,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { ThemeToggle } from '@/components/theme-toggle'
 import { StatsView } from '@/components/views/stats-view'
 import { NewSearchView } from '@/components/views/new-search-view'
 import { LeadsView } from '@/components/views/leads-view'
@@ -81,6 +82,7 @@ export function Dashboard({ session }: DashboardProps) {
           </div>
 
           <div className="ml-auto flex items-center gap-3">
+            <ThemeToggle />
             <div className="hidden sm:flex flex-col items-end leading-tight">
               <span className="text-xs font-medium">{session.user.name || session.user.email}</span>
               <span className="text-[10px] text-muted-foreground capitalize">{session.user.role}</span>

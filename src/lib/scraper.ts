@@ -360,30 +360,42 @@ async function extractLeadsFromFeed(
         let businessStatus: string | undefined
         let address: string | undefined
 
-        for (const line of lines.slice(1, 8)) {
-          const ratingMatch = line.match(/^(\d\.\d)\s*\(?(\d[\d,]*)\)?/)
-          if (ratingMatch && rating === undefined) {
-            rating = parseFloat(ratingMatch[1])
-            reviewsCount = parseInt(ratingMatch[2].replace(/,/g, ''), 10)
-            continue
+        // Rating extraction — try multiple formats Google Maps uses:
+        // "4.5(123)" / "4.5 (123)" / "4.5 · (123)" / "4.5" alone / "Rated 4.5 out of 5"
+        for (const line of lines.slice(1, 10)) {
+          if (rating !== undefined) break
+          // Try: number followed by (count) with optional space/separator
+          const m1 = line.match(/(\d\.\d)\s*[\(]?\s*(\d[\d,]*)\s*[\)]?/)
+          if (m1) {
+            rating = parseFloat(m1[1])
+            reviewsCount = parseInt(m1[2].replace(/,/g, ''), 10)
+            break
           }
+          // Try: just a rating number (no review count)
+          const m2 = line.match(/^[★\s]*(\d\.\d)\s*$/)
+          if (m2) {
+            rating = parseFloat(m2[1])
+            break
+          }
+        }
+
+        // Category + price level + status — parse from lines with · separator
+        for (const line of lines.slice(1, 10)) {
           if (/·/.test(line)) {
-            const parts = line.split('·').map((p) => p.trim())
+            const parts = line.split('·').map((p) => p.trim()).filter(Boolean)
             for (const part of parts) {
-              const r = part.match(/^(\d\.\d)\s*\(?(\d[\d,]*)\)?/)
-              if (r && rating === undefined) {
-                rating = parseFloat(r[1])
-                reviewsCount = parseInt(r[2].replace(/,/g, ''), 10)
-              } else if (/^\$\d?$/.test(part) || /^\${1,4}$/.test(part)) {
-                priceLevel = part
-              } else if (!category && !/open|closes|opens|closed/i.test(part)) {
+              // Skip if it's a rating we already captured
+              if (/^\d\.\d/.test(part)) continue
+              if (/^\$\d?$/.test(part) || /^\${1,4}$/.test(part)) {
+                if (!priceLevel) priceLevel = part
+              } else if (!category && !/open|closes|opens|closed|temporarily|permanently/i.test(part)) {
                 category = part
               }
             }
             continue
           }
           if (/open|closes|opens|closed|temporarily|permanently/i.test(line)) {
-            businessStatus = line
+            if (!businessStatus) businessStatus = line
             continue
           }
           if (/\d+\s+[A-Z]/.test(line) || /\b[A-Z]{2}\s+\d{5}\b/.test(line)) {
@@ -472,6 +484,8 @@ async function enrichLead(context: BrowserContext, lead: ScrapedLead): Promise<v
       let phone: string | undefined
       let website: string | undefined
       let address: string | undefined
+      let rating: number | undefined
+      let reviewsCount: number | undefined
 
       // Phone
       const phoneEl = document.querySelector('[data-item-id^="phone:"]') as HTMLElement | null
@@ -504,12 +518,43 @@ async function enrichLead(context: BrowserContext, lead: ScrapedLead): Promise<v
         address = addrEl.innerText?.trim()
       }
 
-      return { phone, website, address }
+      // Rating + reviews count — try aria-label first (most reliable)
+      // Google Maps uses: aria-label="Rated 4.5 out of 5, 123 reviews"
+      const ratingEls = document.querySelectorAll('[aria-label*="out of 5"], [aria-label*="stars"]')
+      for (const el of Array.from(ratingEls)) {
+        const label = el.getAttribute('aria-label') || ''
+        const m = label.match(/(\d\.?\d?)\s*(?:out of|stars?)?\s*5?.*?(\d[\d,]*)\s*review/i)
+        if (m) {
+          rating = parseFloat(m[1])
+          reviewsCount = parseInt(m[2].replace(/,/g, ''), 10)
+          break
+        }
+        const m2 = label.match(/(\d\.?\d?)\s*(?:out of|stars?)?\s*5/i)
+        if (m2) {
+          rating = parseFloat(m2[1])
+          break
+        }
+      }
+
+      // Fallback: look for rating in the page text
+      if (rating === undefined) {
+        const bodyText = document.body.innerText || ''
+        // "4.5(123 reviews)" or "4.5 (123)" or "4.5 stars 123 reviews"
+        const m = bodyText.match(/(\d\.\d)\s*\(?\s*(\d[\d,]*)\s*\)?\s*review/i)
+        if (m) {
+          rating = parseFloat(m[1])
+          reviewsCount = parseInt(m[2].replace(/,/g, ''), 10)
+        }
+      }
+
+      return { phone, website, address, rating, reviewsCount }
     })
 
     if (detail.phone && !lead.phone) lead.phone = detail.phone
     if (detail.website && !lead.website) lead.website = detail.website
     if (detail.address && !lead.address) lead.address = detail.address
+    if (detail.rating !== undefined && lead.rating === undefined) lead.rating = detail.rating
+    if (detail.reviewsCount !== undefined && lead.reviewsCount === undefined) lead.reviewsCount = detail.reviewsCount
 
     // Parse city/state/zip from address
     if (detail.address) {
