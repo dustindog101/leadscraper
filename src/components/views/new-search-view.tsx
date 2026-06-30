@@ -175,10 +175,10 @@ export function NewSearchView({ onDone, onNavigate }: NewSearchViewProps) {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="flex items-center justify-between">
+            <div className={`flex items-center justify-between rounded-lg border p-3 transition-colors ${useProxy ? 'bg-primary/10 border-primary/40' : 'bg-muted/40'}`}>
               <div>
-                <Label htmlFor="use-proxy">Use proxy</Label>
-                <p className="text-xs text-muted-foreground">Route traffic through your proxy list</p>
+                <Label htmlFor="use-proxy" className="font-medium">Use proxy</Label>
+                <p className="text-xs text-muted-foreground mt-0.5">Route traffic through your proxy list</p>
               </div>
               <Switch id="use-proxy" checked={useProxy} onCheckedChange={setUseProxy} />
             </div>
