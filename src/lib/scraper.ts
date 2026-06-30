@@ -389,36 +389,66 @@ async function extractLeadsFromFeed(
 
 /**
  * Click on a result card to open the detail panel, then extract phone + website.
+ * Uses business name to find the right card (index-based fails due to feed virtualization).
  */
 async function enrichLead(page: Page, _index: number, lead: ScrapedLead): Promise<void> {
-  // Find the card matching this lead's business name.
-  // We can't rely on nth(index) because Google Maps virtualizes the feed —
-  // cards get removed from the DOM as you scroll past them, so nth(50)
-  // may not be the 50th card anymore.
+  // Close any open detail panel first (the back button or Escape)
+  try {
+    const backButton = page.locator('[aria-label="Back"]').first()
+    if (await backButton.isVisible({ timeout: 1000 }).catch(() => false)) {
+      await backButton.click({ timeout: 3000 }).catch(() => {})
+      await sleep(500)
+    } else {
+      await page.keyboard.press('Escape').catch(() => {})
+      await sleep(300)
+    }
+  } catch {
+    // ignore
+  }
+
+  // Find the card matching this lead's business name
   const cards = page.locator('[role="feed"] [role="article"]')
   const count = await cards.count().catch(() => 0)
   if (count === 0) return
 
   let card = null
-  // Try to find a card whose aria-label matches the business name
-  for (let i = 0; i < Math.min(count, 20); i++) {
+  // Try exact match first, then partial match (first 20 chars)
+  for (let i = 0; i < count; i++) {
     const c = cards.nth(i)
     const label = await c.getAttribute('aria-label').catch(() => null)
-    if (label && label.trim() === lead.businessName) {
+    if (!label) continue
+    const labelText = label.trim()
+    if (labelText === lead.businessName) {
       card = c
       break
     }
+    // Partial match: first 20 chars (handles truncation)
+    if (labelText.length >= 20 && lead.businessName.length >= 20) {
+      if (labelText.startsWith(lead.businessName.substring(0, 20)) ||
+          lead.businessName.startsWith(labelText.substring(0, 20))) {
+        card = c
+        break
+      }
+    }
   }
-  // Fallback: use the first card if no match
-  if (!card) card = cards.nth(0)
+
+  // If no match found, SKIP enrichment — don't use wrong card's data
+  if (!card) {
+    return
+  }
+
+  // Scroll the card into view before clicking
+  await card.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {})
+  await sleep(jitter(200, 500))
+
   if (!(await card.isVisible().catch(() => false))) return
 
   await card.click({ timeout: 10_000 }).catch(() => {})
-  await sleep(jitter(800, 1500))
+  await sleep(jitter(1000, 2000))
 
   // Wait for detail panel — Google shows phone + website in buttons with data-item-id
   try {
-    await page.waitForSelector('[data-item-id^="phone:"]', { timeout: 8_000 }).catch(() => {})
+    await page.waitForSelector('[data-item-id^="phone:"], [data-item-id="authority"]', { timeout: 8_000 }).catch(() => {})
   } catch {
     // ignore
   }
@@ -464,8 +494,25 @@ async function enrichLead(page: Page, _index: number, lead: ScrapedLead): Promis
       address = addrEl.innerText?.trim()
     }
 
-    return { phone, website, address }
+    // Verify we're on the right business — check the H1 in the detail panel
+    const h1 = document.querySelector('h1') as HTMLElement | null
+    const panelName = h1?.innerText?.trim() || ''
+
+    return { phone, website, address, panelName }
   })
+
+  // Verify the detail panel is showing the right business
+  // If the panel name doesn't match the lead, discard the data (wrong card was clicked)
+  if (detail.panelName && lead.businessName) {
+    const panelLower = detail.panelName.toLowerCase()
+    const leadLower = lead.businessName.toLowerCase()
+    // Check if either contains the other (handles partial matches)
+    if (!panelLower.includes(leadLower.substring(0, Math.min(15, leadLower.length))) &&
+        !leadLower.includes(panelLower.substring(0, Math.min(15, panelLower.length)))) {
+      // Mismatch — don't use this data
+      return
+    }
+  }
 
   if (detail.phone && !lead.phone) lead.phone = detail.phone
   if (detail.website && !lead.website) lead.website = detail.website
