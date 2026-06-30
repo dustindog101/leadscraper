@@ -112,7 +112,10 @@ export async function scrapeGoogleMaps(opts: ScrapeOptions): Promise<ScrapeResul
       ],
     })
 
-    const context = await browser.newContext({
+    // Context WITH proxy — used ONLY for loading the Google Maps search feed
+    // (the part that triggers rate limiting). Enrichment uses a separate
+    // non-proxy context to minimize proxy bandwidth usage.
+    const proxyContext = await browser.newContext({
       viewport: { width: 1440, height: 900 },
       userAgent: DEFAULT_UA,
       locale: 'en-US',
@@ -125,15 +128,30 @@ export async function scrapeGoogleMaps(opts: ScrapeOptions): Promise<ScrapeResul
         : {}),
     })
 
-    await context.addCookies([
-      { name: 'goog-lr', value: 'lang_en', domain: '.google.com', path: '/' },
-    ])
-
-    await context.addInitScript(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => false })
-      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] })
-      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] })
+    // Context WITHOUT proxy — used for enrichment (opening place detail pages)
+    // This saves proxy bandwidth: only the initial search goes through proxy.
+    const enrichContext = await browser.newContext({
+      viewport: { width: 1440, height: 900 },
+      userAgent: DEFAULT_UA,
+      locale: 'en-US',
+      timezoneId: 'America/New_York',
+      extraHTTPHeaders: { 'Accept-Language': 'en-US,en;q=0.9' },
     })
+
+    // Apply cookies + stealth to both contexts
+    for (const ctx of [proxyContext, enrichContext]) {
+      await ctx.addCookies([
+        { name: 'goog-lr', value: 'lang_en', domain: '.google.com', path: '/' },
+      ])
+      await ctx.addInitScript(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => false })
+        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] })
+        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] })
+      })
+    }
+
+    // Use proxyContext for the main page (feed loading)
+    const context = proxyContext
 
     const page = await context.newPage()
     page.setDefaultTimeout(30_000)
@@ -234,7 +252,7 @@ export async function scrapeGoogleMaps(opts: ScrapeOptions): Promise<ScrapeResul
           batch.map(async (lead) => {
             if (lead.phone && lead.website && lead.address) return lead
             try {
-              await enrichLead(context, lead, false)  // false = no reviews yet
+              await enrichLead(enrichContext, lead, false)  // false = no reviews yet
               return lead
             } catch { return lead }
           })
@@ -250,6 +268,9 @@ export async function scrapeGoogleMaps(opts: ScrapeOptions): Promise<ScrapeResul
     }
 
     // === PHASE 3: REVIEWS — Only if enabled, after all core data saved ===
+    // Reviews are NON-BLOCKING: if this phase fails or times out, all leads
+    // already have core data (phone, website, address, rating, placeUrl).
+    // Each lead's review extraction has a hard 10s timeout.
     if (extractReviews && collectedLeads.length > 0 && !shouldCancel?.()) {
       onProgress?.('reviews', 0, collectedLeads.length)
       let reviewsCount = 0
@@ -260,12 +281,16 @@ export async function scrapeGoogleMaps(opts: ScrapeOptions): Promise<ScrapeResul
         if (shouldCancel?.()) break
 
         const batch = collectedLeads.slice(i, i + concurrency)
+        // Hard 10s timeout per lead — if reviews hang, skip that lead
         const batchResults = await Promise.allSettled(
           batch.map(async (lead) => {
             try {
-              await enrichLead(context, lead, true)  // true = reviews only
+              await Promise.race([
+                enrichLead(enrichContext, lead, true),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('review timeout')), 10_000)),
+              ])
               return lead
-            } catch { return lead }
+            } catch { return lead }  // timeout or error — still return lead, just no reviews
           })
         )
 
@@ -278,6 +303,7 @@ export async function scrapeGoogleMaps(opts: ScrapeOptions): Promise<ScrapeResul
       }
     }
 
+    await enrichContext.close().catch(() => {})
     await context.close()
     return { leads: collectedLeads }
   } catch (e) {

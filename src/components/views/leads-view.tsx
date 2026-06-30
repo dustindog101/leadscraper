@@ -14,7 +14,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Skeleton } from '@/components/ui/skeleton'
 import {
   Search, Download, ExternalLink, Phone, MapPin, Globe, AlertCircle,
-  ChevronLeft, ChevronRight, Tag as TagIcon, X, Star, Filter, Sparkles, Loader2,
+  ChevronLeft, ChevronRight, Tag as TagIcon, X, Star, Filter, Sparkles, Loader2, Trash2,
 } from 'lucide-react'
 import { toast } from 'sonner'
 
@@ -66,6 +66,19 @@ export function LeadsView() {
       queryClient.invalidateQueries({ queryKey: ['leads'] })
       queryClient.invalidateQueries({ queryKey: ['stats'] })
     },
+  })
+
+  const bulkDeleteMutation = useMutation({
+    mutationFn: async (ids: string[]) => {
+      await Promise.all(ids.map((id) => api.deleteLead(id)))
+    },
+    onSuccess: (_data, ids) => {
+      toast.success(`Deleted ${ids.length} lead${ids.length > 1 ? 's' : ''}`)
+      setSelected(new Set())
+      queryClient.invalidateQueries({ queryKey: ['leads'] })
+      queryClient.invalidateQueries({ queryKey: ['stats'] })
+    },
+    onError: (e: Error) => toast.error(e.message),
   })
 
   const exportMutation = useMutation({
@@ -300,7 +313,7 @@ export function LeadsView() {
         </CardContent>
       </Card>
 
-      {/* Bulk tag bar */}
+      {/* Bulk action bar */}
       {(selected.size > 0 || expanded) && (
         <Card className="border-primary/30 bg-primary/5">
           <CardContent className="py-3 flex items-center gap-2 flex-wrap">
@@ -319,6 +332,22 @@ export function LeadsView() {
             <Button size="sm" variant="outline" onClick={applyTag}>
               <TagIcon className="h-3.5 w-3.5 mr-1" /> Apply Tag
             </Button>
+            {selected.size > 1 && (
+              <Button
+                size="sm"
+                variant="destructive"
+                disabled={bulkDeleteMutation.isPending}
+                onClick={() => {
+                  if (confirm(`Delete ${selected.size} selected leads? This cannot be undone.`)) {
+                    bulkDeleteMutation.mutate(Array.from(selected))
+                  }
+                }}
+                className="gap-1"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                {bulkDeleteMutation.isPending ? 'Deleting...' : `Delete ${selected.size}`}
+              </Button>
+            )}
             {selected.size > 0 && (
               <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())}>
                 Clear
