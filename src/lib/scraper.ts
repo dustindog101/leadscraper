@@ -35,6 +35,7 @@ export interface ScrapedLead {
   state?: string
   zip?: string
   country?: string
+  detailUrl?: string
 }
 
 export interface ScrapeOptions {
@@ -297,9 +298,11 @@ async function extractLeadsFromFeed(
         const businessName = (el.getAttribute('aria-label') || lines[0] || '').trim()
         if (!businessName || businessName.length < 2) return
 
-        // Place ID: from the href of the anchor (cid=... or 0x... format)
+        // Place ID + detail URL: from the href of the anchor
         const anchor = el.tagName === 'A' ? el : el.querySelector('a')
         const href = anchor?.getAttribute('href') || ''
+        // Store the full href for later deep-scrape (navigate directly to place page)
+        const detailUrl = href.startsWith('http') ? href : (href ? `https://www.google.com${href}` : '')
         let placeId = ''
         const cidMatch = href.match(/0x[0-9a-f]+:0x[0-9a-f]+/)
         if (cidMatch) placeId = cidMatch[0]
@@ -409,6 +412,7 @@ async function extractLeadsFromFeed(
           website,
           lat,
           lng,
+          detailUrl,
         })
       })
       return results
@@ -418,72 +422,29 @@ async function extractLeadsFromFeed(
 }
 
 /**
- * Click on a result card to open the detail panel, then extract phone + website.
- * Uses business name to find the right card (index-based fails due to feed virtualization).
+ * Navigate directly to the place's Google Maps URL to open its detail page,
+ * then extract phone + website + address. This is more reliable than clicking
+ * cards in the feed (which virtualizes and causes mismatches).
  */
 async function enrichLead(page: Page, _index: number, lead: ScrapedLead): Promise<void> {
-  // Close any open detail panel first (the back button or Escape)
+  if (!lead.detailUrl) return
+
+  // Navigate directly to the place's URL
   try {
-    const backButton = page.locator('[aria-label="Back"]').first()
-    if (await backButton.isVisible({ timeout: 1000 }).catch(() => false)) {
-      await backButton.click({ timeout: 3000 }).catch(() => {})
-      await sleep(500)
-    } else {
-      await page.keyboard.press('Escape').catch(() => {})
-      await sleep(300)
-    }
+    await page.goto(lead.detailUrl, { waitUntil: 'domcontentloaded', timeout: 15_000 })
   } catch {
-    // ignore
-  }
-
-  // Find the card matching this lead's business name
-  const cards = page.locator('[role="feed"] [role="article"]')
-  const count = await cards.count().catch(() => 0)
-  if (count === 0) return
-
-  let card = null
-  // Try exact match first, then partial match (first 20 chars)
-  for (let i = 0; i < count; i++) {
-    const c = cards.nth(i)
-    const label = await c.getAttribute('aria-label').catch(() => null)
-    if (!label) continue
-    const labelText = label.trim()
-    if (labelText === lead.businessName) {
-      card = c
-      break
-    }
-    // Partial match: first 20 chars (handles truncation)
-    if (labelText.length >= 20 && lead.businessName.length >= 20) {
-      if (labelText.startsWith(lead.businessName.substring(0, 20)) ||
-          lead.businessName.startsWith(labelText.substring(0, 20))) {
-        card = c
-        break
-      }
-    }
-  }
-
-  // If no match found, SKIP enrichment — don't use wrong card's data
-  if (!card) {
     return
   }
+  await sleep(jitter(1500, 2500))
 
-  // Scroll the card into view before clicking
-  await card.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {})
-  await sleep(jitter(200, 500))
-
-  if (!(await card.isVisible().catch(() => false))) return
-
-  await card.click({ timeout: 10_000 }).catch(() => {})
-  await sleep(jitter(1000, 2000))
-
-  // Wait for detail panel — Google shows phone + website in buttons with data-item-id
+  // Wait for the detail panel to load
   try {
-    await page.waitForSelector('[data-item-id^="phone:"], [data-item-id="authority"]', { timeout: 8_000 }).catch(() => {})
+    await page.waitForSelector('[data-item-id^="phone:"], [data-item-id="authority"], [data-item-id="address"]', { timeout: 8_000 }).catch(() => {})
   } catch {
     // ignore
   }
 
-  // Extract from detail panel
+  // Extract from detail page
   const detail = await page.evaluate(() => {
     let phone: string | undefined
     let website: string | undefined
@@ -493,16 +454,10 @@ async function enrichLead(page: Page, _index: number, lead: ScrapedLead): Promis
     const phoneEl = document.querySelector('[data-item-id^="phone:"]') as HTMLElement | null
     if (phoneEl) {
       const raw = phoneEl.getAttribute('data-item-id') || ''
-      // Format is "phone:+13012319100" — strip prefix, keep "+1 301-231-9100" formatted
       const digits = raw.replace(/^phone:/, '').trim()
       if (digits) {
-        // Try to format US numbers nicely
         const usMatch = digits.match(/^\+?1?(\d{3})(\d{3})(\d{4})$/)
-        if (usMatch) {
-          phone = `+1 ${usMatch[1]}-${usMatch[2]}-${usMatch[3]}`
-        } else {
-          phone = digits
-        }
+        phone = usMatch ? `+1 ${usMatch[1]}-${usMatch[2]}-${usMatch[3]}` : digits
       }
       if (!phone) phone = phoneEl.innerText?.trim()
     }
@@ -511,7 +466,6 @@ async function enrichLead(page: Page, _index: number, lead: ScrapedLead): Promis
     const websiteEl = document.querySelector('[data-item-id="authority"]') as HTMLElement | null
     if (websiteEl) {
       let href = websiteEl.getAttribute('href') || ''
-      // Google sometimes wraps URLs — strip tracking prefixes if present
       if (href.startsWith('/url?q=')) {
         href = new URL(href, location.origin).searchParams.get('q') || href
       }
@@ -524,25 +478,8 @@ async function enrichLead(page: Page, _index: number, lead: ScrapedLead): Promis
       address = addrEl.innerText?.trim()
     }
 
-    // Verify we're on the right business — check the H1 in the detail panel
-    const h1 = document.querySelector('h1') as HTMLElement | null
-    const panelName = h1?.innerText?.trim() || ''
-
-    return { phone, website, address, panelName }
+    return { phone, website, address }
   })
-
-  // Verify the detail panel is showing the right business
-  // If the panel name doesn't match the lead, discard the data (wrong card was clicked)
-  if (detail.panelName && lead.businessName) {
-    const panelLower = detail.panelName.toLowerCase()
-    const leadLower = lead.businessName.toLowerCase()
-    // Check if either contains the other (handles partial matches)
-    if (!panelLower.includes(leadLower.substring(0, Math.min(15, leadLower.length))) &&
-        !leadLower.includes(panelLower.substring(0, Math.min(15, panelLower.length)))) {
-      // Mismatch — don't use this data
-      return
-    }
-  }
 
   if (detail.phone && !lead.phone) lead.phone = detail.phone
   if (detail.website && !lead.website) lead.website = detail.website
