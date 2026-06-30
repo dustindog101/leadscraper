@@ -143,15 +143,23 @@ export function NewSearchView({ onDone, onNavigate }: NewSearchViewProps) {
               <input
                 id="max"
                 type="range"
-                min={20}
-                max={1000}
-                step={20}
+                min={5}
+                max={10000}
+                step={5}
                 value={maxResults}
                 onChange={(e) => setMaxResults(Number(e.target.value))}
                 className="w-full accent-primary"
               />
+              <div className="flex justify-between text-[10px] text-muted-foreground">
+                <span>5</span>
+                <span>1,000</span>
+                <span>5,000</span>
+                <span>10,000</span>
+              </div>
               <p className="text-xs text-muted-foreground">
-                Larger numbers take longer — roughly 3 seconds per result for deep scraping.
+                {maxResults <= 200 && "Fast (~1-2 min). No proxy needed."}
+                {maxResults > 200 && maxResults <= 1000 && "Medium (~5-10 min). Proxy recommended."}
+                {maxResults > 1000 && "Long (~15-60 min). Proxy strongly recommended to avoid rate limits."}
               </p>
             </div>
           </CardContent>

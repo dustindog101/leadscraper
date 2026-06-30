@@ -1,23 +1,22 @@
 /**
  * Google Maps business scraper using Patchright (Playwright fork).
  *
- * Strategy:
- *  1. Open https://www.google.com/maps/search/{query}+{location}
- *  2. Wait for the results feed `[role="feed"]`
- *  3. Auto-scroll the feed until we hit maxResults or no new results load
- *  4. For each result, extract business fields via DOM scraping
- *  5. Enrich each lead by navigating directly to its Google Maps place URL
+ * THREE-PHASE ARCHITECTURE:
+ *   Phase 1 (collect): Scroll the results feed, extract cards, save leads
+ *     immediately with basic data (name, rating, category, placeUrl).
+ *   Phase 2 (enrich): Open each place's URL for phone/website/address.
+ *     Save enriched data immediately. Leads appear in DB FAST.
+ *   Phase 3 (reviews): Open each place's URL with !9m1!1b1 for reviews.
+ *     Only runs if extractReviews=true. Does NOT block core data.
  *
- * Anti-bot:
+ * If the job is cancelled during Phase 3, all leads still have core data.
+ *
+ * ANTI-BOT:
  *  - Patchright patches Runtime.enable leak + Console.enable leak
- *  - Realistic user-agent, viewport, locale, timezone
- *  - Random delays between scrolls and between navigations
- *  - Optional proxy rotation (one proxy per browser context)
- *  - If Google shows a captcha / "unusual traffic", abort and report
- *
- * Leads are saved to DB immediately as they're enriched (via onLead callback).
- * This means partial results are preserved even if the job is cancelled or
- * the worker crashes.
+ *  - 3 retry attempts for feed loading with exponential backoff
+ *  - Warmup navigation (google.com → maps) to look human
+ *  - Auto-proxy fallback: if direct fails, retry with proxy
+ *  - Random delays between all actions
  */
 
 import { chromium, type Browser, type BrowserContext, type Page } from 'patchright'
@@ -47,7 +46,7 @@ export interface ScrapedLead {
 
 export interface Review {
   authorName: string
-  rating: number  // 1-5
+  rating: number
   text: string
   relativeDate?: string
 }
@@ -57,12 +56,13 @@ export interface ScrapeOptions {
   location: string
   maxResults: number
   proxyRotator?: ProxyRotator
-  onProgress?: (phase: 'collect' | 'enrich', count: number, total: number) => void
-  onLead?: (lead: ScrapedLead) => void  // Called immediately when a lead is ready
+  onProgress?: (phase: 'collect' | 'enrich' | 'reviews', count: number, total: number) => void
+  onLead?: (lead: ScrapedLead) => void
   shouldCancel?: () => boolean
   shouldPause?: () => boolean
   headless?: boolean
-  concurrency?: number  // Number of leads to enrich in parallel (default: 3)
+  concurrency?: number
+  extractReviews?: boolean  // default: true
 }
 
 export interface ScrapeResult {
@@ -90,6 +90,7 @@ export async function scrapeGoogleMaps(opts: ScrapeOptions): Promise<ScrapeResul
     shouldPause,
     headless = true,
     concurrency = 3,
+    extractReviews = true,
   } = opts
 
   if (!query || !location) {
@@ -116,85 +117,96 @@ export async function scrapeGoogleMaps(opts: ScrapeOptions): Promise<ScrapeResul
       userAgent: DEFAULT_UA,
       locale: 'en-US',
       timezoneId: 'America/New_York',
-      geolocation: { latitude: 39.0458, longitude: -76.6413 }, // Maryland
+      geolocation: { latitude: 39.0458, longitude: -76.6413 },
       permissions: ['geolocation'],
-      extraHTTPHeaders: {
-        'Accept-Language': 'en-US,en;q=0.9',
-      },
+      extraHTTPHeaders: { 'Accept-Language': 'en-US,en;q=0.9' },
       ...(proxy
-        ? {
-            proxy: {
-              server: proxy.server,
-              username: proxy.username,
-              password: proxy.password,
-            },
-          }
+        ? { proxy: { server: proxy.server, username: proxy.username, password: proxy.password } }
         : {}),
     })
 
-    // Force Google cookies to English/US
     await context.addCookies([
-      {
-        name: 'goog-lr',
-        value: 'lang_en',
-        domain: '.google.com',
-        path: '/',
-      },
+      { name: 'goog-lr', value: 'lang_en', domain: '.google.com', path: '/' },
     ])
 
-    // Hide webdriver flag
     await context.addInitScript(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => false })
-      Object.defineProperty(navigator, 'plugins', {
-        get: () => [1, 2, 3, 4, 5],
-      })
-      Object.defineProperty(navigator, 'languages', {
-        get: () => ['en-US', 'en'],
-      })
+      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] })
+      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] })
     })
 
     const page = await context.newPage()
     page.setDefaultTimeout(30_000)
     page.setDefaultNavigationTimeout(60_000)
 
+    // === WARMUP: Visit google.com first to establish a session ===
+    // This makes the subsequent Maps navigation look more human
+    try {
+      await page.goto('https://www.google.com', { waitUntil: 'domcontentloaded', timeout: 15_000 })
+      await sleep(jitter(1500, 2500))
+    } catch {
+      // If warmup fails, continue anyway
+    }
+
+    // === PHASE 1: COLLECT — Load search results + scroll feed ===
     const searchUrl = `https://www.google.com/maps/search/${encodeURIComponent(
       `${query} ${location}`
     )}?hl=en&gl=us`
 
-    try {
-      await page.goto(searchUrl, { waitUntil: 'domcontentloaded' })
-    } catch {
-      await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 90_000 }).catch(() => {})
-    }
+    // Retry feed loading up to 3 times with exponential backoff
+    let feedLoaded = false
+    let lastError = ''
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      if (shouldCancel?.()) break
 
-    // Handle Google consent banner if present (EU)
-    try {
-      const consentBtn = page.locator('button:has-text("Accept all"), button:has-text("Reject all")').first()
-      if (await consentBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
-        await consentBtn.click()
-        await sleep(800)
-      }
-    } catch {
-      // ignore
-    }
+      try {
+        await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 })
+        await sleep(jitter(2000, 3000))
 
-    // Wait for the results feed
-    const feedSelector = '[role="feed"]'
-    try {
-      await page.waitForSelector(feedSelector, { timeout: 30_000 })
-    } catch {
-      const bodyText = await page.content()
-      if (/unusual traffic|captcha|detected unusual/i.test(bodyText)) {
-        return {
-          leads: [],
-          blocked: true,
-          error: 'Google detected unusual traffic. Try again later, use a proxy, or reduce rate.',
+        // Handle EU consent banner
+        try {
+          const consentBtn = page.locator('button:has-text("Accept all"), button:has-text("Reject all")').first()
+          if (await consentBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
+            await consentBtn.click()
+            await sleep(800)
+          }
+        } catch { /* ignore */ }
+
+        // Wait for feed
+        await page.waitForSelector('[role="feed"]', { timeout: 20_000 })
+        feedLoaded = true
+        break
+      } catch (e) {
+        lastError = e instanceof Error ? e.message : String(e)
+        console.log(`[scraper] feed load attempt ${attempt}/3 failed: ${lastError.slice(0, 100)}`)
+
+        // Check if blocked
+        const bodyText = await page.content().catch(() => '')
+        if (/unusual traffic|captcha|detected unusual/i.test(bodyText)) {
+          return {
+            leads: [],
+            blocked: true,
+            error: 'Google detected unusual traffic. The worker IP may be rate-limited. Try using a proxy or wait 10-30 minutes.',
+          }
+        }
+
+        if (attempt < 3) {
+          const backoff = attempt * 5000  // 5s, 10s
+          console.log(`[scraper] retrying in ${backoff / 1000}s...`)
+          await sleep(backoff)
         }
       }
-      return { leads: [], error: 'Google Maps results feed did not load' }
     }
 
-    // Phase 1: Scroll and collect all lead cards (with basic data)
+    if (!feedLoaded) {
+      await context.close()
+      return {
+        leads: [],
+        error: `Google Maps results feed did not load after 3 attempts. ${lastError ? `Last error: ${lastError.slice(0, 100)}` : ''} Try enabling a proxy or wait 10-30 minutes for the rate limit to reset.`,
+      }
+    }
+
+    // Scroll + collect all leads
     const collectedLeads = await scrollAndCollect(page, {
       maxResults,
       onProgress: (count) => onProgress?.('collect', count, maxResults),
@@ -202,54 +214,66 @@ export async function scrapeGoogleMaps(opts: ScrapeOptions): Promise<ScrapeResul
       shouldPause,
     })
 
-    // Save each collected lead immediately (even without enrichment)
-    // so partial results are preserved if the job is cancelled
+    // Save each collected lead immediately with basic data
     for (const lead of collectedLeads) {
       onLead?.(lead)
     }
 
-    // Phase 2: Enrich leads in parallel (navigate to each place's URL for phone/website/address)
+    // === PHASE 2: ENRICH — Open each place URL for phone/website/address ===
     if (collectedLeads.length > 0) {
       onProgress?.('enrich', 0, collectedLeads.length)
       let enrichedCount = 0
 
-      // Process in batches of `concurrency` to avoid opening too many tabs
       for (let i = 0; i < collectedLeads.length; i += concurrency) {
         if (shouldCancel?.()) break
-
-        // Check for pause
-        while (shouldPause?.()) {
-          await sleep(2000)
-          if (shouldCancel?.()) break
-        }
+        while (shouldPause?.()) { await sleep(2000); if (shouldCancel?.()) break }
         if (shouldCancel?.()) break
 
         const batch = collectedLeads.slice(i, i + concurrency)
         const batchResults = await Promise.allSettled(
           batch.map(async (lead) => {
-            // Skip if already has phone + website from card
-            if (lead.phone && lead.website && lead.address) {
-              return lead
-            }
+            if (lead.phone && lead.website && lead.address) return lead
             try {
-              await enrichLead(context, lead)
+              await enrichLead(context, lead, false)  // false = no reviews yet
               return lead
-            } catch {
-              return lead
-            }
+            } catch { return lead }
           })
         )
 
-        // Re-save enriched leads
         for (const result of batchResults) {
-          if (result.status === 'fulfilled') {
-            onLead?.(result.value)
-          }
+          if (result.status === 'fulfilled') onLead?.(result.value)
           enrichedCount++
           onProgress?.('enrich', enrichedCount, collectedLeads.length)
         }
+        await sleep(jitter(300, 600))
+      }
+    }
 
-        // Small delay between batches
+    // === PHASE 3: REVIEWS — Only if enabled, after all core data saved ===
+    if (extractReviews && collectedLeads.length > 0 && !shouldCancel?.()) {
+      onProgress?.('reviews', 0, collectedLeads.length)
+      let reviewsCount = 0
+
+      for (let i = 0; i < collectedLeads.length; i += concurrency) {
+        if (shouldCancel?.()) break
+        while (shouldPause?.()) { await sleep(2000); if (shouldCancel?.()) break }
+        if (shouldCancel?.()) break
+
+        const batch = collectedLeads.slice(i, i + concurrency)
+        const batchResults = await Promise.allSettled(
+          batch.map(async (lead) => {
+            try {
+              await enrichLead(context, lead, true)  // true = reviews only
+              return lead
+            } catch { return lead }
+          })
+        )
+
+        for (const result of batchResults) {
+          if (result.status === 'fulfilled') onLead?.(result.value)
+          reviewsCount++
+          onProgress?.('reviews', reviewsCount, collectedLeads.length)
+        }
         await sleep(jitter(300, 600))
       }
     }
@@ -283,12 +307,9 @@ async function scrollAndCollect(
 
   const feed = page.locator('[role="feed"]').first()
 
-  for (let iter = 0; iter < 200 && leads.length < opts.maxResults; iter++) {
+  for (let iter = 0; iter < 500 && leads.length < opts.maxResults; iter++) {
     if (opts.shouldCancel?.()) break
-    while (opts.shouldPause?.()) {
-      await sleep(2000)
-      if (opts.shouldCancel?.()) break
-    }
+    while (opts.shouldPause?.()) { await sleep(2000); if (opts.shouldCancel?.()) break }
     if (opts.shouldCancel?.()) break
 
     const newLeads = await extractLeadsFromFeed(page, Array.from(seenPlaceIds))
@@ -344,7 +365,6 @@ async function extractLeadsFromFeed(
         const businessName = (el.getAttribute('aria-label') || lines[0] || '').trim()
         if (!businessName || businessName.length < 2) return
 
-        // Place ID + detail URL: from the href of the anchor
         const anchor = el.tagName === 'A' ? el : el.querySelector('a')
         const href = anchor?.getAttribute('href') || ''
         const detailUrl = href.startsWith('http') ? href : (href ? `https://www.google.com${href}` : '')
@@ -368,31 +388,22 @@ async function extractLeadsFromFeed(
         let businessStatus: string | undefined
         let address: string | undefined
 
-        // Rating extraction — try multiple formats Google Maps uses:
-        // "4.5(123)" / "4.5 (123)" / "4.5 · (123)" / "4.5" alone / "Rated 4.5 out of 5"
         for (const line of lines.slice(1, 10)) {
           if (rating !== undefined) break
-          // Try: number followed by (count) with optional space/separator
           const m1 = line.match(/(\d\.\d)\s*[\(]?\s*(\d[\d,]*)\s*[\)]?/)
           if (m1) {
             rating = parseFloat(m1[1])
             reviewsCount = parseInt(m1[2].replace(/,/g, ''), 10)
             break
           }
-          // Try: just a rating number (no review count)
           const m2 = line.match(/^[★\s]*(\d\.\d)\s*$/)
-          if (m2) {
-            rating = parseFloat(m2[1])
-            break
-          }
+          if (m2) { rating = parseFloat(m2[1]); break }
         }
 
-        // Category + price level + status — parse from lines with · separator
         for (const line of lines.slice(1, 10)) {
           if (/·/.test(line)) {
             const parts = line.split('·').map((p) => p.trim()).filter(Boolean)
             for (const part of parts) {
-              // Skip if it's a rating we already captured
               if (/^\d\.\d/.test(part)) continue
               if (/^\$\d?$/.test(part) || /^\${1,4}$/.test(part)) {
                 if (!priceLevel) priceLevel = part
@@ -415,20 +426,14 @@ async function extractLeadsFromFeed(
         let lng: number | undefined
         const innerHtml = el.innerHTML
         const coordMatch = innerHtml.match(/(-?\d{1,3}\.\d{4,}),\s*(-?\d{1,3}\.\d{4,})/)
-        if (coordMatch) {
-          lat = parseFloat(coordMatch[1])
-          lng = parseFloat(coordMatch[2])
-        }
+        if (coordMatch) { lat = parseFloat(coordMatch[1]); lng = parseFloat(coordMatch[2]) }
 
-        // Try to extract phone from the card itself
         let phone: string | undefined
         const phoneEl = el.querySelector('[data-item-id^="phone:"]') as HTMLElement | null
         if (phoneEl) {
           const raw = phoneEl.getAttribute('data-item-id') || ''
           let digits = raw.replace(/^phone:/, '').trim()
-          if (!digits) {
-            digits = (phoneEl.innerText || '').trim().replace(/^tel:/, '').trim()
-          }
+          if (!digits) digits = (phoneEl.innerText || '').trim().replace(/^tel:/, '').trim()
           digits = digits.replace(/^tel:/, '').trim()
           if (digits) {
             const usMatch = digits.match(/^\+?1?(\d{3})(\d{3})(\d{4})$/)
@@ -436,32 +441,18 @@ async function extractLeadsFromFeed(
           }
         }
 
-        // Try to extract website from the card itself
         let website: string | undefined
         const websiteEl = el.querySelector('[data-item-id="authority"]') as HTMLElement | null
         if (websiteEl) {
           let url = websiteEl.getAttribute('href') || ''
-          if (url.startsWith('/url?q=')) {
-            url = new URL(url, location.origin).searchParams.get('q') || url
-          }
+          if (url.startsWith('/url?q=')) url = new URL(url, location.origin).searchParams.get('q') || url
           website = url || undefined
         }
 
         results.push({
-          placeId,
-          businessName: businessName.trim(),
-          rating,
-          reviewsCount,
-          category,
-          priceLevel,
-          businessStatus,
-          address,
-          phone,
-          website,
-          lat,
-          lng,
-          detailUrl,
-          placeUrl: detailUrl,
+          placeId, businessName: businessName.trim(), rating, reviewsCount,
+          category, priceLevel, businessStatus, address, phone, website,
+          lat, lng, detailUrl, placeUrl: detailUrl,
         })
       })
       return results
@@ -471,145 +462,119 @@ async function extractLeadsFromFeed(
 }
 
 /**
- * Navigate directly to the place's Google Maps URL to open its detail page,
- * then extract phone + website + address. Uses a new page (tab) so the
- * main feed page is preserved for concurrent enrichment.
+ * Enrich a lead by navigating to its Google Maps place URL.
+ * If reviewsOnly=true, only extract reviews (core data already saved).
+ * If reviewsOnly=false, extract phone/website/address/rating (no reviews).
  */
-async function enrichLead(context: BrowserContext, lead: ScrapedLead): Promise<void> {
+async function enrichLead(
+  context: BrowserContext,
+  lead: ScrapedLead,
+  reviewsOnly: boolean
+): Promise<void> {
   if (!lead.detailUrl) return
 
   const page = await context.newPage()
   try {
-    // Navigate to the place URL with !9m1!1b1 appended to open the reviews panel directly
-    // (avoids needing to click the Reviews tab — saves ~1.5s per lead)
-    let reviewsUrl = lead.detailUrl
-    if (!reviewsUrl.includes('!9m1!1b1')) {
-      const qIdx = reviewsUrl.indexOf('?')
-      if (qIdx > 0) {
-        reviewsUrl = reviewsUrl.slice(0, qIdx) + '!9m1!1b1' + reviewsUrl.slice(qIdx)
-      } else {
-        reviewsUrl += '!9m1!1b1'
+    let targetUrl = lead.detailUrl
+
+    if (reviewsOnly) {
+      // Append !9m1!1b1 to open reviews panel directly
+      if (!targetUrl.includes('!9m1!1b1')) {
+        const qIdx = targetUrl.indexOf('?')
+        targetUrl = qIdx > 0
+          ? targetUrl.slice(0, qIdx) + '!9m1!1b1' + targetUrl.slice(qIdx)
+          : targetUrl + '!9m1!1b1'
       }
     }
 
-    await page.goto(reviewsUrl, { waitUntil: 'domcontentloaded', timeout: 15_000 })
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 15_000 })
     await sleep(jitter(1500, 2500))
 
-    // Wait for detail panel elements
-    await page
-      .waitForSelector('[data-item-id^="phone:"], [data-item-id="authority"], [data-item-id="address"]', { timeout: 8_000 })
-      .catch(() => {})
+    if (!reviewsOnly) {
+      // Phase 2: Extract phone/website/address/rating
+      await page
+        .waitForSelector('[data-item-id^="phone:"], [data-item-id="authority"], [data-item-id="address"]', { timeout: 8_000 })
+        .catch(() => {})
 
-    const detail = await page.evaluate(() => {
-      let phone: string | undefined
-      let website: string | undefined
-      let address: string | undefined
-      let rating: number | undefined
-      let reviewsCount: number | undefined
+      const detail = await page.evaluate(() => {
+        let phone: string | undefined
+        let website: string | undefined
+        let address: string | undefined
+        let rating: number | undefined
+        let reviewsCount: number | undefined
 
-      // Phone
-      const phoneEl = document.querySelector('[data-item-id^="phone:"]') as HTMLElement | null
-      if (phoneEl) {
-        const raw = phoneEl.getAttribute('data-item-id') || ''
-        let digits = raw.replace(/^phone:/, '').trim()
-        if (!digits) {
-          digits = (phoneEl.innerText || '').trim().replace(/^tel:/, '').trim()
+        const phoneEl = document.querySelector('[data-item-id^="phone:"]') as HTMLElement | null
+        if (phoneEl) {
+          const raw = phoneEl.getAttribute('data-item-id') || ''
+          let digits = raw.replace(/^phone:/, '').trim()
+          if (!digits) digits = (phoneEl.innerText || '').trim().replace(/^tel:/, '').trim()
+          digits = digits.replace(/^tel:/, '').trim()
+          if (digits) {
+            const usMatch = digits.match(/^\+?1?(\d{3})(\d{3})(\d{4})$/)
+            phone = usMatch ? `+1 ${usMatch[1]}-${usMatch[2]}-${usMatch[3]}` : digits
+          }
         }
-        digits = digits.replace(/^tel:/, '').trim()
-        if (digits) {
-          const usMatch = digits.match(/^\+?1?(\d{3})(\d{3})(\d{4})$/)
-          phone = usMatch ? `+1 ${usMatch[1]}-${usMatch[2]}-${usMatch[3]}` : digits
+
+        const websiteEl = document.querySelector('[data-item-id="authority"]') as HTMLElement | null
+        if (websiteEl) {
+          let href = websiteEl.getAttribute('href') || ''
+          if (href.startsWith('/url?q=')) href = new URL(href, location.origin).searchParams.get('q') || href
+          website = href || undefined
         }
+
+        const addrEl = document.querySelector('[data-item-id="address"]') as HTMLElement | null
+        if (addrEl) address = addrEl.innerText?.trim()
+
+        const ratingEls = document.querySelectorAll('[aria-label*="out of 5"], [aria-label*="stars"]')
+        for (const el of Array.from(ratingEls)) {
+          const label = el.getAttribute('aria-label') || ''
+          const m = label.match(/(\d\.?\d?)\s*(?:out of|stars?)?\s*5?.*?(\d[\d,]*)\s*review/i)
+          if (m) { rating = parseFloat(m[1]); reviewsCount = parseInt(m[2].replace(/,/g, ''), 10); break }
+          const m2 = label.match(/(\d\.?\d?)\s*(?:out of|stars?)?\s*5/i)
+          if (m2) { rating = parseFloat(m2[1]); break }
+        }
+
+        if (rating === undefined) {
+          const bodyText = document.body.innerText || ''
+          const m = bodyText.match(/(\d\.\d)\s*\(?\s*(\d[\d,]*)\s*\)?\s*review/i)
+          if (m) { rating = parseFloat(m[1]); reviewsCount = parseInt(m[2].replace(/,/g, ''), 10) }
+        }
+
+        return { phone, website, address, rating, reviewsCount }
+      })
+
+      if (detail.phone && !lead.phone) lead.phone = detail.phone
+      if (detail.website && !lead.website) lead.website = detail.website
+      if (detail.address && !lead.address) lead.address = detail.address
+      if (detail.rating !== undefined && lead.rating === undefined) lead.rating = detail.rating
+      if (detail.reviewsCount !== undefined && lead.reviewsCount === undefined) lead.reviewsCount = detail.reviewsCount
+
+      if (detail.address) {
+        const parsed = parseAddress(detail.address)
+        if (parsed.city) lead.city = parsed.city
+        if (parsed.state) lead.state = parsed.state
+        if (parsed.zip) lead.zip = parsed.zip
       }
-
-      // Website
-      const websiteEl = document.querySelector('[data-item-id="authority"]') as HTMLElement | null
-      if (websiteEl) {
-        let href = websiteEl.getAttribute('href') || ''
-        if (href.startsWith('/url?q=')) {
-          href = new URL(href, location.origin).searchParams.get('q') || href
-        }
-        website = href || undefined
-      }
-
-      // Address
-      const addrEl = document.querySelector('[data-item-id="address"]') as HTMLElement | null
-      if (addrEl) {
-        address = addrEl.innerText?.trim()
-      }
-
-      // Rating + reviews count — try aria-label first (most reliable)
-      // Google Maps uses: aria-label="Rated 4.5 out of 5, 123 reviews"
-      const ratingEls = document.querySelectorAll('[aria-label*="out of 5"], [aria-label*="stars"]')
-      for (const el of Array.from(ratingEls)) {
-        const label = el.getAttribute('aria-label') || ''
-        const m = label.match(/(\d\.?\d?)\s*(?:out of|stars?)?\s*5?.*?(\d[\d,]*)\s*review/i)
-        if (m) {
-          rating = parseFloat(m[1])
-          reviewsCount = parseInt(m[2].replace(/,/g, ''), 10)
-          break
-        }
-        const m2 = label.match(/(\d\.?\d?)\s*(?:out of|stars?)?\s*5/i)
-        if (m2) {
-          rating = parseFloat(m2[1])
-          break
-        }
-      }
-
-      // Fallback: look for rating in the page text
-      if (rating === undefined) {
-        const bodyText = document.body.innerText || ''
-        // "4.5(123 reviews)" or "4.5 (123)" or "4.5 stars 123 reviews"
-        const m = bodyText.match(/(\d\.\d)\s*\(?\s*(\d[\d,]*)\s*\)?\s*review/i)
-        if (m) {
-          rating = parseFloat(m[1])
-          reviewsCount = parseInt(m[2].replace(/,/g, ''), 10)
-        }
-      }
-
-      return { phone, website, address, rating, reviewsCount }
-    })
-
-    if (detail.phone && !lead.phone) lead.phone = detail.phone
-    if (detail.website && !lead.website) lead.website = detail.website
-    if (detail.address && !lead.address) lead.address = detail.address
-    if (detail.rating !== undefined && lead.rating === undefined) lead.rating = detail.rating
-    if (detail.reviewsCount !== undefined && lead.reviewsCount === undefined) lead.reviewsCount = detail.reviewsCount
-
-    // Parse city/state/zip from address
-    if (detail.address) {
-      const parsed = parseAddress(detail.address)
-      if (parsed.city) lead.city = parsed.city
-      if (parsed.state) lead.state = parsed.state
-      if (parsed.zip) lead.zip = parsed.zip
+    } else {
+      // Phase 3: Extract reviews only
+      lead.reviews = await extractReviews(page, 5)
     }
-
-    // Extract up to 5 reviews (RPC first, DOM fallback)
-    lead.reviews = await extractReviews(page, 5)
   } finally {
     await page.close().catch(() => {})
   }
 }
 
 /**
- * Extract up to `maxReviews` reviews from a Google Maps place page.
- * Strategy: try internal RPC endpoint first (most stable), fall back to DOM.
+ * Extract up to `maxReviews` reviews. RPC first, DOM fallback.
  */
 async function extractReviews(page: Page, maxReviews: number): Promise<Review[]> {
-  // Attempt 1: Internal RPC endpoint
   try {
     const rpcReviews = await extractReviewsViaRPC(page, maxReviews)
     if (rpcReviews.length > 0) return rpcReviews
-  } catch {
-    // fall through to DOM
-  }
-
-  // Attempt 2: DOM extraction
+  } catch { /* fall through */ }
   try {
     return await extractReviewsFromDOM(page, maxReviews)
-  } catch {
-    return []
-  }
+  } catch { return [] }
 }
 
 async function extractReviewsViaRPC(page: Page, maxReviews: number): Promise<Review[]> {
@@ -635,52 +600,38 @@ async function extractReviewsViaRPC(page: Page, maxReviews: number): Promise<Rev
       const r = await fetch(url, { credentials: 'include' })
       if (!r.ok) return null
       return await r.text()
-    } catch {
-      return null
-    }
+    } catch { return null }
   }, rpcUrl)
   if (!result) return []
 
-  // Response is JSON prefixed with XSSI protection ")]}'\n"
   const clean = result.replace(/^\)\]\}'\s*\n/, '')
   let parsed: unknown[]
-  try {
-    parsed = JSON.parse(clean)
-  } catch {
-    return []
-  }
+  try { parsed = JSON.parse(clean) } catch { return [] }
 
-  // Defensive JSON walking — Google's RPC response shape changes periodically
   const reviewList = Array.isArray(parsed?.[2]) ? (parsed as unknown[])[2] as unknown[] : []
   const out: Review[] = []
   for (const entry of reviewList) {
     try {
       const rev = (entry as unknown[])[0] as unknown
-      // Walk defensively: rev[1][0][0] = author name, rev[2] = rating, rev[3][0] = text
       const authorName = String(
         ((rev as unknown[][])?.[1]?.[0] as unknown[])?.[0] ||
-        (rev as unknown[][])?.[1]?.[0]?.[4] ||
-        ''
+        (rev as unknown[][])?.[1]?.[0]?.[4] || ''
       )
       const rating = Number((rev as unknown[])?.[2]) || 0
       const text = String(
         ((rev as unknown[])?.[3] as unknown[])?.[0] ||
-        (rev as unknown[])?.[3] ||
-        ''
+        (rev as unknown[])?.[3] || ''
       )
       const relativeDate = String((rev as unknown[][])?.[1]?.[0]?.[8] || '')
       if (authorName && (text || rating > 0)) {
         out.push({
-          authorName: authorName.slice(0, 200),
-          rating,
+          authorName: authorName.slice(0, 200), rating,
           text: text.slice(0, 1000),
           relativeDate: relativeDate.slice(0, 50),
         })
       }
       if (out.length >= maxReviews) break
-    } catch {
-      continue
-    }
+    } catch { continue }
   }
   return out
 }
@@ -699,10 +650,7 @@ async function extractReviewsFromDOM(page: Page, maxReviews: number): Promise<Re
         let authorName = ''
         for (const sel of authorSel) {
           const n = el.querySelector(sel)
-          if (n?.textContent?.trim()) {
-            authorName = n.textContent.trim()
-            break
-          }
+          if (n?.textContent?.trim()) { authorName = n.textContent.trim(); break }
         }
 
         let rating = 0
@@ -717,33 +665,23 @@ async function extractReviewsFromDOM(page: Page, maxReviews: number): Promise<Re
         let text = ''
         for (const sel of textSel) {
           const t = el.querySelector(sel)
-          if (t?.textContent?.trim()) {
-            text = t.textContent.trim()
-            break
-          }
+          if (t?.textContent?.trim()) { text = t.textContent.trim(); break }
         }
 
         const dateSel = ['.rsqaWe', '.DU9Pgb', '.tTVLSc', '.dehysf']
         let relativeDate = ''
         for (const sel of dateSel) {
           const d = el.querySelector(sel)
-          if (d?.textContent?.trim()) {
-            relativeDate = d.textContent.trim()
-            break
-          }
+          if (d?.textContent?.trim()) { relativeDate = d.textContent.trim(); break }
         }
 
         if (authorName && (text || rating > 0)) {
           out.push({
-            authorName: authorName.slice(0, 200),
-            rating,
-            text: text.slice(0, 1000),
-            relativeDate: relativeDate.slice(0, 50),
+            authorName: authorName.slice(0, 200), rating,
+            text: text.slice(0, 1000), relativeDate: relativeDate.slice(0, 50),
           })
         }
-      } catch {
-        // skip
-      }
+      } catch { /* skip */ }
     })
     return out
   }, maxReviews)

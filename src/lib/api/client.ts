@@ -264,4 +264,19 @@ export const api = {
 
   deleteUser: (id: string) =>
     fetchJson<{ ok: boolean }>(`/api/users/${id}`, { method: 'DELETE' }),
+
+  // AI enrichment
+  enrichLead: (leadId: string) =>
+    fetchJson<{
+      leadId: string
+      businessName: string
+      contacts: Array<{ id: string; name: string; title?: string | null; email?: string | null; confidence: number }>
+      count: number
+    }>('/api/leads/enrich', { method: 'POST', body: JSON.stringify({ leadId }) }),
+
+  enrichBatch: (limit: number) =>
+    fetchJson<{ total: number; enriched: number; failed: number; results: unknown[] }>(
+      '/api/leads/enrich',
+      { method: 'POST', body: JSON.stringify({ limit }) }
+    ),
 }

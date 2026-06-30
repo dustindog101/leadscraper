@@ -107,7 +107,7 @@ export function JobsView() {
                         <Progress value={job.progress} className={`h-1.5 ${job.status === 'paused' ? 'opacity-50' : ''}`} />
                         <div className="flex justify-between text-xs text-muted-foreground">
                           <span>
-                            {job.status === 'paused' ? '⏸ Paused' : `${job.progress}%`} · {job.leadsFound} leads so far
+                            {job.status === 'paused' ? '⏸ Paused' : getPhaseLabel(job.progress)} · {job.leadsFound} leads
                             {job.noWebsiteCount > 0 && <span className="text-amber-600 ml-1">({job.noWebsiteCount} no website)</span>}
                           </span>
                           <span>max {job.maxResults}</span>
@@ -206,4 +206,10 @@ function StatusBadge({ status }: { status: string }) {
       {label}
     </Badge>
   )
+}
+
+function getPhaseLabel(progress: number): string {
+  if (progress < 30) return `Collecting leads (${progress}%)`
+  if (progress < 70) return `Enriching contact info (${progress}%)`
+  return `Extracting reviews (${progress}%)`
 }

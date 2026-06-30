@@ -202,14 +202,18 @@ export async function runSearchJob(jobId: string): Promise<void> {
         }).catch(() => {})
       },
       onProgress: async (phase, count, total) => {
-        // Calculate overall progress:
-        // - collect phase: 0-50% (collecting leads from feed)
-        // - enrich phase: 50-100% (enriching each lead with phone/website)
+        // Three-phase progress:
+        // - collect: 0-30% (scrolling feed, collecting cards)
+        // - enrich: 30-70% (opening each place URL for phone/website/address)
+        // - reviews: 70-100% (extracting reviews — does NOT block core data)
         let pct = 0
         if (phase === 'collect') {
-          pct = Math.min(50, Math.round((count / Math.max(total, 1)) * 50))
+          pct = Math.min(30, Math.round((count / Math.max(total, 1)) * 30))
+        } else if (phase === 'enrich') {
+          pct = 30 + Math.min(40, Math.round((count / Math.max(total, 1)) * 40))
         } else {
-          pct = 50 + Math.min(50, Math.round((count / Math.max(total, 1)) * 50))
+          // reviews phase
+          pct = 70 + Math.min(30, Math.round((count / Math.max(total, 1)) * 30))
         }
         await db.searchJob.update({
           where: { id: jobId },

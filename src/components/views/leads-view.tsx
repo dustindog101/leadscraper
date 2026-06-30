@@ -14,7 +14,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Skeleton } from '@/components/ui/skeleton'
 import {
   Search, Download, ExternalLink, Phone, MapPin, Globe, AlertCircle,
-  ChevronLeft, ChevronRight, Tag as TagIcon, X, Star, Filter,
+  ChevronLeft, ChevronRight, Tag as TagIcon, X, Star, Filter, Sparkles, Loader2,
 } from 'lucide-react'
 import { toast } from 'sonner'
 
@@ -696,6 +696,7 @@ function LeadRow({
                       </Button>
                     </a>
                   )}
+                  <EnrichButton leadId={lead.id} hasWebsite={!!lead.website} />
                   <Button
                     size="sm"
                     variant="destructive"
@@ -715,5 +716,42 @@ function LeadRow({
         </tr>
       )}
     </>
+  )
+}
+
+function EnrichButton({ leadId, hasWebsite }: { leadId: string; hasWebsite: boolean }) {
+  const [loading, setLoading] = useState(false)
+  const queryClient = useQueryClient()
+
+  if (!hasWebsite) return null
+
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      disabled={loading}
+      onClick={async (e) => {
+        e.stopPropagation()
+        setLoading(true)
+        try {
+          const result = await api.enrichLead(leadId)
+          if (result.count > 0) {
+            toast.success(`Found ${result.count} contact${result.count > 1 ? 's' : ''}: ${result.contacts.map(c => c.name).join(', ')}`)
+            queryClient.invalidateQueries({ queryKey: ['leads'] })
+          } else {
+            toast.info('No owner names found on this website')
+          }
+        } catch (err) {
+          toast.error(err instanceof Error ? err.message : 'Enrichment failed')
+        } finally {
+          setLoading(false)
+        }
+      }}
+      className="gap-1"
+      title="Use AI to find owner/manager names from their website"
+    >
+      {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+      {loading ? 'AI...' : 'Find Owner'}
+    </Button>
   )
 }

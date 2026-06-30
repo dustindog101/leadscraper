@@ -26,7 +26,7 @@ export async function POST(req: Request) {
     )
   }
 
-  const cappedMax = Math.min(Math.max(10, Number(maxResults) || 200), 2000)
+  const cappedMax = Math.min(Math.max(5, Number(maxResults) || 200), 10000)
 
   // If proxy requested, validate config exists
   if (useProxy && proxyConfigId) {
