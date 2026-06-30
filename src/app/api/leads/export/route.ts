@@ -54,11 +54,13 @@ export async function POST(req: Request) {
     include: {
       contacts: { orderBy: { confidence: 'desc' }, take: 1 },
       tags: { include: { tag: true } },
+      reviews: { orderBy: { capturedAt: 'desc' }, take: 5 },
     },
   })
 
   const rows = leads.map((l) => {
     const contact = l.contacts[0]
+    const topReviews = (l.reviews || []).slice(0, 3)
     return {
       businessName: l.businessName,
       category: l.category || '',
@@ -82,6 +84,9 @@ export async function POST(req: Request) {
       lat: l.lat ?? '',
       lng: l.lng ?? '',
       discoveredAt: l.discoveredAt.toISOString(),
+      topReview1: topReviews[0] ? `[${topReviews[0].rating}★] ${topReviews[0].text.substring(0, 200)}` : '',
+      topReview2: topReviews[1] ? `[${topReviews[1].rating}★] ${topReviews[1].text.substring(0, 200)}` : '',
+      topReview3: topReviews[2] ? `[${topReviews[2].rating}★] ${topReviews[2].text.substring(0, 200)}` : '',
     }
   })
 

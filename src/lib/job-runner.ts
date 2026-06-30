@@ -81,9 +81,22 @@ export async function runSearchJob(jobId: string): Promise<void> {
             lng: lead.lng ?? undefined,
             businessStatus: lead.businessStatus ?? undefined,
             updatedAt: new Date(),
+            // Only update reviews if we got new ones (don't overwrite with empty)
+            ...(lead.reviews && lead.reviews.length > 0
+              ? {
+                  reviews: {
+                    deleteMany: {},
+                    create: lead.reviews.map((r) => ({
+                      authorName: r.authorName,
+                      rating: r.rating,
+                      text: r.text,
+                      relativeDate: r.relativeDate || null,
+                    })),
+                  },
+                }
+              : {}),
           },
         })
-        // Update tracking — website may have been added during enrichment
         leadHasWebsite.set(lead.placeId, !!lead.website)
       } catch {
         // ignore individual update errors
@@ -116,6 +129,19 @@ export async function runSearchJob(jobId: string): Promise<void> {
           lng: lead.lng ?? null,
           businessStatus: lead.businessStatus ?? null,
           sourceJobId: jobId,
+          // Create reviews if we have them
+          ...(lead.reviews && lead.reviews.length > 0
+            ? {
+                reviews: {
+                  create: lead.reviews.map((r) => ({
+                    authorName: r.authorName,
+                    rating: r.rating,
+                    text: r.text,
+                    relativeDate: r.relativeDate || null,
+                  })),
+                },
+              }
+            : {}),
         },
         update: {},
       })

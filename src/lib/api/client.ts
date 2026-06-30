@@ -44,6 +44,16 @@ export interface Lead {
   updatedAt: string
   contacts?: LeadContact[]
   tags?: { tag: Tag }[]
+  reviews?: Review[]
+}
+
+export interface Review {
+  id: string
+  authorName: string
+  rating: number
+  text: string
+  relativeDate?: string | null
+  capturedAt: string
 }
 
 export interface LeadContact {

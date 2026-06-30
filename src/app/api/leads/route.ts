@@ -61,6 +61,7 @@ export async function GET(req: Request) {
       skip: offset,
       include: {
         contacts: { orderBy: { confidence: 'desc' }, take: 1 },
+        reviews: { orderBy: { capturedAt: 'desc' }, take: 5 },
         // Only include the current user's tags
         tags: {
           where: { userId: session.user.id },

@@ -87,6 +87,7 @@ model Lead {
 
   contacts      LeadContact[]
   tags          LeadTag[]
+  reviews       Review[]
 
   @@index([city])
   @@index([state])
@@ -144,4 +145,18 @@ model ProxyConfig {
   updatedAt   DateTime @updatedAt
 
   searchJobs  SearchJob[]
+}
+
+model Review {
+  id           String   @id @default(cuid())
+  leadId       String
+  lead         Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  authorName   String
+  rating       Int      // 1-5
+  text         String   // max 1000 chars
+  relativeDate String?  // "2 weeks ago", "3 months ago"
+  source       String   @default("google-maps")
+  capturedAt   DateTime @default(now())
+
+  @@index([leadId])
 }

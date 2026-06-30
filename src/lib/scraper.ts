@@ -42,6 +42,14 @@ export interface ScrapedLead {
   zip?: string
   country?: string
   detailUrl?: string
+  reviews?: Review[]
+}
+
+export interface Review {
+  authorName: string
+  rating: number  // 1-5
+  text: string
+  relativeDate?: string
 }
 
 export interface ScrapeOptions {
@@ -472,7 +480,19 @@ async function enrichLead(context: BrowserContext, lead: ScrapedLead): Promise<v
 
   const page = await context.newPage()
   try {
-    await page.goto(lead.detailUrl, { waitUntil: 'domcontentloaded', timeout: 15_000 })
+    // Navigate to the place URL with !9m1!1b1 appended to open the reviews panel directly
+    // (avoids needing to click the Reviews tab — saves ~1.5s per lead)
+    let reviewsUrl = lead.detailUrl
+    if (!reviewsUrl.includes('!9m1!1b1')) {
+      const qIdx = reviewsUrl.indexOf('?')
+      if (qIdx > 0) {
+        reviewsUrl = reviewsUrl.slice(0, qIdx) + '!9m1!1b1' + reviewsUrl.slice(qIdx)
+      } else {
+        reviewsUrl += '!9m1!1b1'
+      }
+    }
+
+    await page.goto(reviewsUrl, { waitUntil: 'domcontentloaded', timeout: 15_000 })
     await sleep(jitter(1500, 2500))
 
     // Wait for detail panel elements
@@ -563,9 +583,170 @@ async function enrichLead(context: BrowserContext, lead: ScrapedLead): Promise<v
       if (parsed.state) lead.state = parsed.state
       if (parsed.zip) lead.zip = parsed.zip
     }
+
+    // Extract up to 5 reviews (RPC first, DOM fallback)
+    lead.reviews = await extractReviews(page, 5)
   } finally {
     await page.close().catch(() => {})
   }
+}
+
+/**
+ * Extract up to `maxReviews` reviews from a Google Maps place page.
+ * Strategy: try internal RPC endpoint first (most stable), fall back to DOM.
+ */
+async function extractReviews(page: Page, maxReviews: number): Promise<Review[]> {
+  // Attempt 1: Internal RPC endpoint
+  try {
+    const rpcReviews = await extractReviewsViaRPC(page, maxReviews)
+    if (rpcReviews.length > 0) return rpcReviews
+  } catch {
+    // fall through to DOM
+  }
+
+  // Attempt 2: DOM extraction
+  try {
+    return await extractReviewsFromDOM(page, maxReviews)
+  } catch {
+    return []
+  }
+}
+
+async function extractReviewsViaRPC(page: Page, maxReviews: number): Promise<Review[]> {
+  const currentUrl = page.url()
+  const placeIdMatch = currentUrl.match(/!1s(0x[0-9a-f]+:0x[0-9a-f]+)/)
+  if (!placeIdMatch) return []
+  const placeId = placeIdMatch[1]
+
+  const pageSize = Math.min(20, Math.max(maxReviews, 10))
+  const requestId = Math.random().toString(36).slice(2, 23)
+  const pb = [
+    `!1m6!1s${encodeURIComponent(placeId)}`,
+    '!6m4!4m1!1e1!4m1!1e3',
+    `!2m2!1i${pageSize}!2s`,
+    `!5m2!1s${requestId}!7e81`,
+    '!8m9!2b1!3b1!5b1!7b1',
+    '!12m4!1b1!2b1!4m1!1e1!11m0!13m1!1e1',
+  ].join('')
+  const rpcUrl = `https://www.google.com/maps/rpc/listugcposts?authuser=0&hl=en&pb=${pb}`
+
+  const result = await page.evaluate(async (url: string) => {
+    try {
+      const r = await fetch(url, { credentials: 'include' })
+      if (!r.ok) return null
+      return await r.text()
+    } catch {
+      return null
+    }
+  }, rpcUrl)
+  if (!result) return []
+
+  // Response is JSON prefixed with XSSI protection ")]}'\n"
+  const clean = result.replace(/^\)\]\}'\s*\n/, '')
+  let parsed: unknown[]
+  try {
+    parsed = JSON.parse(clean)
+  } catch {
+    return []
+  }
+
+  // Defensive JSON walking — Google's RPC response shape changes periodically
+  const reviewList = Array.isArray(parsed?.[2]) ? (parsed as unknown[])[2] as unknown[] : []
+  const out: Review[] = []
+  for (const entry of reviewList) {
+    try {
+      const rev = (entry as unknown[])[0] as unknown
+      // Walk defensively: rev[1][0][0] = author name, rev[2] = rating, rev[3][0] = text
+      const authorName = String(
+        ((rev as unknown[][])?.[1]?.[0] as unknown[])?.[0] ||
+        (rev as unknown[][])?.[1]?.[0]?.[4] ||
+        ''
+      )
+      const rating = Number((rev as unknown[])?.[2]) || 0
+      const text = String(
+        ((rev as unknown[])?.[3] as unknown[])?.[0] ||
+        (rev as unknown[])?.[3] ||
+        ''
+      )
+      const relativeDate = String((rev as unknown[][])?.[1]?.[0]?.[8] || '')
+      if (authorName && (text || rating > 0)) {
+        out.push({
+          authorName: authorName.slice(0, 200),
+          rating,
+          text: text.slice(0, 1000),
+          relativeDate: relativeDate.slice(0, 50),
+        })
+      }
+      if (out.length >= maxReviews) break
+    } catch {
+      continue
+    }
+  }
+  return out
+}
+
+async function extractReviewsFromDOM(page: Page, maxReviews: number): Promise<Review[]> {
+  await page.waitForSelector('[data-review-id]', { timeout: 5000 }).catch(() => {})
+
+  return await page.evaluate((max: number) => {
+    const out: Array<{ authorName: string; rating: number; text: string; relativeDate: string }> = []
+    const cards = document.querySelectorAll('[data-review-id]')
+    cards.forEach((card) => {
+      const el = card as HTMLElement
+      if (out.length >= max) return
+      try {
+        const authorSel = ['.d4r55', '.WNxzHc', '.TSUbDb a', 'button.al6Kxe', '.bHrnEe']
+        let authorName = ''
+        for (const sel of authorSel) {
+          const n = el.querySelector(sel)
+          if (n?.textContent?.trim()) {
+            authorName = n.textContent.trim()
+            break
+          }
+        }
+
+        let rating = 0
+        const ratingEl = el.querySelector('[role="img"][aria-label*="star"], [aria-label*="out of 5"]') as HTMLElement | null
+        if (ratingEl) {
+          const label = ratingEl.getAttribute('aria-label') || ''
+          const m = label.match(/(\d+(?:\.\d+)?)/)
+          if (m) rating = Math.round(parseFloat(m[1]))
+        }
+
+        const textSel = ['.wiI7pd', '.MyEned span', '.Jtu6Td span']
+        let text = ''
+        for (const sel of textSel) {
+          const t = el.querySelector(sel)
+          if (t?.textContent?.trim()) {
+            text = t.textContent.trim()
+            break
+          }
+        }
+
+        const dateSel = ['.rsqaWe', '.DU9Pgb', '.tTVLSc', '.dehysf']
+        let relativeDate = ''
+        for (const sel of dateSel) {
+          const d = el.querySelector(sel)
+          if (d?.textContent?.trim()) {
+            relativeDate = d.textContent.trim()
+            break
+          }
+        }
+
+        if (authorName && (text || rating > 0)) {
+          out.push({
+            authorName: authorName.slice(0, 200),
+            rating,
+            text: text.slice(0, 1000),
+            relativeDate: relativeDate.slice(0, 50),
+          })
+        }
+      } catch {
+        // skip
+      }
+    })
+    return out
+  }, maxReviews)
 }
 
 interface ParsedAddress {

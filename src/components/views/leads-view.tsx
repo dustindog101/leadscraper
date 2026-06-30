@@ -647,6 +647,38 @@ function LeadRow({
                   </div>
                 </div>
 
+                {/* Reviews section */}
+                {lead.reviews && lead.reviews.length > 0 && (
+                  <div>
+                    <div className="text-xs text-muted-foreground mb-2 flex items-center gap-1">
+                      <Star className="h-3 w-3" /> Top Reviews ({lead.reviews.length})
+                    </div>
+                    <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                      {lead.reviews.map((review) => (
+                        <div key={review.id} className="rounded-md border p-2 bg-background/50">
+                          <div className="flex items-center justify-between gap-2 mb-1">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-xs font-medium">{review.authorName}</span>
+                              <div className="flex">
+                                {[1,2,3,4,5].map((s) => (
+                                  <Star
+                                    key={s}
+                                    className={`h-2.5 w-2.5 ${s <= review.rating ? 'fill-amber-400 text-amber-400' : 'text-muted-foreground/30'}`}
+                                  />
+                                ))}
+                              </div>
+                            </div>
+                            {review.relativeDate && (
+                              <span className="text-[10px] text-muted-foreground">{review.relativeDate}</span>
+                            )}
+                          </div>
+                          <p className="text-xs text-muted-foreground line-clamp-3">{review.text}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 <div className="flex flex-wrap gap-2 pt-2">
                   {lead.placeUrl && (
                     <a href={lead.placeUrl} target="_blank" rel="noopener noreferrer">
