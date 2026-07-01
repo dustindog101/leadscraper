@@ -1,34 +1,64 @@
 import { NextResponse } from 'next/server'
 import { getServerSession } from 'next-auth'
 import { authOptions } from '@/lib/auth'
+import { db } from '@/lib/db'
 import { fullProxyTest } from '@/lib/proxy-test'
 import { parseProxyList } from '@/lib/proxy'
 
-// POST /api/proxies/test — lightweight proxy test (TCP + HTTP, no browser)
-// Body: { proxies } — tests the FIRST proxy in the list
-//
-// This endpoint works on Vercel (no Chromium needed) — uses Node's net/http
-// modules for a fast TCP connect test + HTTP CONNECT tunnel test.
+// POST /api/proxies/test — test ALL proxies (batch)
+// Body: { proxyConfigId?, proxies?, keepWorking? }
 export async function POST(req: Request) {
   const session = await getServerSession(authOptions)
-  if (!session?.user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-  }
+  if (!session?.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const body = await req.json().catch(() => ({}))
-  const { proxies } = body as { proxies?: string }
-
-  if (!proxies) {
-    return NextResponse.json({ error: 'proxies is required' }, { status: 400 })
+  const { proxyConfigId, proxies, keepWorking } = body as {
+    proxyConfigId?: string; proxies?: string; keepWorking?: boolean
   }
 
-  const list = parseProxyList(proxies)
-  if (list.length === 0) {
-    return NextResponse.json({ error: 'No valid proxy entries' }, { status: 400 })
+  let proxyList: string[] = []
+  let configId: string | undefined = proxyConfigId
+
+  if (proxyConfigId) {
+    const config = await db.proxyConfig.findUnique({ where: { id: proxyConfigId } })
+    if (!config) return NextResponse.json({ error: 'Config not found' }, { status: 404 })
+    proxyList = config.proxies.split(/\r?\n/).filter(Boolean)
+  } else if (proxies) {
+    proxyList = parseProxyList(proxies).map((p) => p.raw)
+  } else {
+    return NextResponse.json({ error: 'proxyConfigId or proxies required' }, { status: 400 })
   }
 
-  const proxy = list[0]
-  const result = await fullProxyTest(proxy.raw, 8000)
+  if (proxyList.length === 0) return NextResponse.json({ error: 'No proxies to test' }, { status: 400 })
 
-  return NextResponse.json(result)
+  const results: Array<{ proxy: string; ok: boolean; exitIp?: string; error?: string; elapsedMs: number }> = []
+  for (let i = 0; i < proxyList.length; i += 5) {
+    const batch = proxyList.slice(i, i + 5)
+    const batchResults = await Promise.all(batch.map((p) => fullProxyTest(p, 8000)))
+    results.push(...batchResults)
+  }
+
+  const working = results.filter((r) => r.ok)
+  const failed = results.filter((r) => !r.ok)
+
+  if (keepWorking && configId && working.length > 0) {
+    await db.proxyConfig.update({
+      where: { id: configId },
+      data: { proxies: working.map((r) => r.proxy).join('\n') },
+    })
+  }
+
+  return NextResponse.json({
+    total: proxyList.length,
+    working: working.length,
+    failed: failed.length,
+    results: results.map((r) => ({
+      proxy: r.proxy.replace(/(:[^:@/]+)@/, ':****@'),
+      ok: r.ok,
+      exitIp: r.exitIp,
+      error: r.error,
+      elapsedMs: r.elapsedMs,
+    })),
+    updatedConfig: keepWorking && configId ? true : false,
+  })
 }
