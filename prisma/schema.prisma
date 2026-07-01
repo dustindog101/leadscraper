@@ -85,6 +85,19 @@ model Lead {
   discoveredAt  DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
+  // AI-persisted results (stay until regenerated)
+  aiScore         Int?
+  aiScoreReason   String?
+  aiScoreRec      String?
+  aiScoreAt       DateTime?
+  aiEmailSubject  String?
+  aiEmailBody     String?
+  aiEmailAt       DateTime?
+  aiSentimentSummary  String?
+  aiSentimentPositive String?
+  aiSentimentNegative String?
+  aiSentimentAt   DateTime?
+
   contacts      LeadContact[]
   tags          LeadTag[]
   reviews       Review[]
@@ -159,4 +172,13 @@ model Review {
   capturedAt   DateTime @default(now())
 
   @@index([leadId])
+}
+
+model Setting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     String
+  category  String   @default("ai")
+  updatedAt DateTime @updatedAt
+  updatedBy String?
 }
