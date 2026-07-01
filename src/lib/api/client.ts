@@ -279,4 +279,28 @@ export const api = {
       '/api/leads/enrich',
       { method: 'POST', body: JSON.stringify({ limit }) }
     ),
+
+  // AI lead scoring
+  scoreLead: (leadId: string) =>
+    fetchJson<{
+      leadId: string
+      businessName: string
+      score: { score: number; reason: string; recommendation: string }
+    }>('/api/leads/score', { method: 'POST', body: JSON.stringify({ leadId }) }),
+
+  // AI email generation
+  generateEmail: (leadId: string) =>
+    fetchJson<{
+      leadId: string
+      businessName: string
+      email: { subject: string; body: string }
+    }>('/api/leads/email', { method: 'POST', body: JSON.stringify({ leadId }) }),
+
+  // AI sentiment analysis
+  analyzeSentiment: (leadId: string) =>
+    fetchJson<{
+      leadId: string
+      businessName: string
+      sentiment: { positiveThemes: string[]; negativeThemes: string[]; summary: string }
+    }>('/api/leads/sentiment', { method: 'POST', body: JSON.stringify({ leadId }) }),
 }

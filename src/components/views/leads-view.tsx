@@ -726,6 +726,7 @@ function LeadRow({
                     </a>
                   )}
                   <EnrichButton leadId={lead.id} hasWebsite={!!lead.website} />
+                  <AiButtons leadId={lead.id} hasReviews={!!(lead.reviews && lead.reviews.length > 0)} />
                   <Button
                     size="sm"
                     variant="destructive"
@@ -782,5 +783,123 @@ function EnrichButton({ leadId, hasWebsite }: { leadId: string; hasWebsite: bool
       {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
       {loading ? 'AI...' : 'Find Owner'}
     </Button>
+  )
+}
+
+function AiButtons({ leadId, hasReviews }: { leadId: string; hasReviews: boolean }) {
+  const [scoring, setScoring] = useState(false)
+  const [emailing, setEmailing] = useState(false)
+  const [sentimenting, setSentimenting] = useState(false)
+  const [results, setResults] = useState<{
+    score?: { score: number; reason: string; recommendation: string }
+    email?: { subject: string; body: string }
+    sentiment?: { positiveThemes: string[]; negativeThemes: string[]; summary: string }
+  }>({})
+
+  async function handleScore() {
+    setScoring(true)
+    try {
+      const res = await api.scoreLead(leadId)
+      setResults((r) => ({ ...r, score: res.score }))
+      toast.success(`Lead score: ${res.score.score}/100`)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'AI scoring failed', { duration: 6000 })
+    } finally {
+      setScoring(false)
+    }
+  }
+
+  async function handleEmail() {
+    setEmailing(true)
+    try {
+      const res = await api.generateEmail(leadId)
+      setResults((r) => ({ ...r, email: res.email }))
+      // Copy to clipboard
+      navigator.clipboard.writeText(`Subject: ${res.email.subject}\n\n${res.email.body}`)
+      toast.success('Email generated + copied to clipboard!')
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'AI email generation failed', { duration: 6000 })
+    } finally {
+      setEmailing(false)
+    }
+  }
+
+  async function handleSentiment() {
+    setSentimenting(true)
+    try {
+      const res = await api.analyzeSentiment(leadId)
+      setResults((r) => ({ ...r, sentiment: res.sentiment }))
+      toast.success('Sentiment analysis complete')
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'AI sentiment analysis failed', { duration: 6000 })
+    } finally {
+      setSentimenting(false)
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2 w-full">
+      <div className="flex flex-wrap gap-2">
+        <Button size="sm" variant="outline" onClick={handleScore} disabled={scoring} className="gap-1">
+          {scoring ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Star className="h-3.5 w-3.5" />}
+          Score Lead
+        </Button>
+        <Button size="sm" variant="outline" onClick={handleEmail} disabled={emailing} className="gap-1">
+          {emailing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+          Write Email
+        </Button>
+        {hasReviews && (
+          <Button size="sm" variant="outline" onClick={handleSentiment} disabled={sentimenting} className="gap-1">
+            {sentimenting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
+            Sentiment
+          </Button>
+        )}
+      </div>
+
+      {/* AI Results */}
+      {results.score && (
+        <div className="rounded-md border p-3 bg-primary/5 space-y-1">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium">Lead Score:</span>
+            <Badge variant={results.score.score >= 70 ? 'default' : results.score.score >= 40 ? 'secondary' : 'outline'}>
+              {results.score.score}/100
+            </Badge>
+          </div>
+          <p className="text-xs text-muted-foreground">{results.score.reason}</p>
+          <p className="text-xs text-primary">{results.score.recommendation}</p>
+        </div>
+      )}
+
+      {results.email && (
+        <div className="rounded-md border p-3 bg-primary/5 space-y-2">
+          <div className="text-xs text-muted-foreground">Generated Email (copied to clipboard):</div>
+          <div className="text-sm font-medium">Subject: {results.email.subject}</div>
+          <pre className="text-xs whitespace-pre-wrap font-sans text-muted-foreground">{results.email.body}</pre>
+        </div>
+      )}
+
+      {results.sentiment && (
+        <div className="rounded-md border p-3 bg-primary/5 space-y-2">
+          <div className="text-xs text-muted-foreground">Review Sentiment:</div>
+          <p className="text-xs">{results.sentiment.summary}</p>
+          {results.sentiment.positiveThemes.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              <span className="text-xs text-emerald-600">+ </span>
+              {results.sentiment.positiveThemes.map((t, i) => (
+                <Badge key={i} variant="outline" className="text-[10px] text-emerald-700 border-emerald-300">{t}</Badge>
+              ))}
+            </div>
+          )}
+          {results.sentiment.negativeThemes.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              <span className="text-xs text-red-600">− </span>
+              {results.sentiment.negativeThemes.map((t, i) => (
+                <Badge key={i} variant="outline" className="text-[10px] text-red-700 border-red-300">{t}</Badge>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   )
 }

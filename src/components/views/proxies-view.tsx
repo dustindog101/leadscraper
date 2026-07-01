@@ -60,10 +60,42 @@ export function ProxiesView() {
       if (data.ok) {
         toast.success(`Proxy works! Exit IP: ${data.exitIp} (${data.elapsedMs}ms)`)
       } else {
-        toast.error(`Proxy test failed: ${data.error}`)
+        toast.error(`Proxy test failed: ${data.error}`, {
+          duration: 6000,
+        })
       }
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: (e: Error) => toast.error(`Test failed: ${e.message}`, { duration: 6000 }),
+  })
+
+  // ProxyScrape fetch mutation
+  const fetchProxyScrapeMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch('/api/proxies/proxyscrape?protocol=http&limit=30')
+      if (!res.ok) throw new Error('Failed to fetch from ProxyScrape')
+      return res.json() as Promise<{ count: number; proxies: string[] }>
+    },
+    onSuccess: async (data) => {
+      if (data.count === 0) {
+        toast.error('No free proxies available from ProxyScrape right now')
+        return
+      }
+      // Create a proxy config with the fetched proxies
+      const proxyList = data.proxies.join('\n')
+      try {
+        await api.createProxy({
+          name: `ProxyScrape Free (${data.count} proxies)`,
+          type: 'http',
+          proxies: proxyList,
+          rotateMode: 'random',
+        })
+        toast.success(`Fetched ${data.count} free proxies from ProxyScrape and saved as a config`)
+        queryClient.invalidateQueries({ queryKey: ['proxies'] })
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : 'Failed to save ProxyScrape proxies')
+      }
+    },
+    onError: (e: Error) => toast.error(`ProxyScrape fetch failed: ${e.message}`),
   })
 
   function handleSubmit(e: React.FormEvent) {
@@ -80,9 +112,25 @@ export function ProxiesView() {
             Route scraper traffic through HTTP or SOCKS5 proxies. Single or rotating list.
           </p>
         </div>
-        <Button onClick={() => setShowForm((v) => !v)} className="gap-2">
-          <Plus className="h-4 w-4" /> {showForm ? 'Cancel' : 'Add Proxy'}
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            onClick={() => fetchProxyScrapeMutation.mutate()}
+            disabled={fetchProxyScrapeMutation.isPending}
+            className="gap-2"
+            title="Fetch free public proxies from ProxyScrape API"
+          >
+            {fetchProxyScrapeMutation.isPending ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Globe className="h-4 w-4" />
+            )}
+            Fetch Free Proxies
+          </Button>
+          <Button onClick={() => setShowForm((v) => !v)} className="gap-2">
+            <Plus className="h-4 w-4" /> {showForm ? 'Cancel' : 'Add Proxy'}
+          </Button>
+        </div>
       </div>
 
       {showForm && (
