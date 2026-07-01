@@ -242,3 +242,43 @@ Return ONLY a JSON object:
     return null
   }
 }
+
+/**
+ * Generate a 30-second cold call script.
+ */
+export async function generateCallPitch(params: {
+  businessName: string
+  category?: string | null
+  city?: string | null
+  rating?: number | null
+  reviewsCount?: number | null
+  hasWebsite: boolean
+  reviews?: Review[]
+}): Promise<string | null> {
+  const { businessName, category, rating, reviewsCount, hasWebsite, reviews } = params
+
+  const reviewSummary = reviews && reviews.length > 0
+    ? reviews.slice(0, 3).map((r) => `- "${r.text.slice(0, 150)}" — ${r.authorName} (${r.rating}★)`)
+    : '(no reviews available)'
+
+  const prompt = `Write a 30-second cold call script for a web design agency (cybershare.tech) calling this business.
+
+Business: ${businessName}
+Category: ${category || 'unknown'}
+Rating: ${rating || 'no rating'} (${reviewsCount || 0} reviews)
+Has website: ${hasWebsite ? 'yes' : 'NO — they need one!'}
+
+Reviews summary:
+${reviewSummary}
+
+Requirements:
+- Start with a friendly opener mentioning something specific from their reviews
+- 2-3 sentences max (30 seconds when spoken)
+- Mention you help businesses like theirs improve their online presence
+- End with: "Would you be against a quick 10-minute call later this week?"
+- Sound natural, not scripted
+
+Return ONLY the script text (no JSON, no markdown).`
+
+  return await callMistral(prompt, 400)
+}
