@@ -14,7 +14,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Skeleton } from '@/components/ui/skeleton'
 import {
   Search, Download, ExternalLink, Phone, MapPin, Globe, AlertCircle,
-  ChevronLeft, ChevronRight, Tag as TagIcon, X, Star, Filter, Sparkles, Loader2, Trash2,
+  ChevronLeft, ChevronRight, Tag as TagIcon, X, Star, Filter, Sparkles, Loader2, Trash2, RotateCcw,
 } from 'lucide-react'
 import { toast } from 'sonner'
 
@@ -726,7 +726,7 @@ function LeadRow({
                     </a>
                   )}
                   <EnrichButton leadId={lead.id} hasWebsite={!!lead.website} />
-                  <AiButtons leadId={lead.id} hasReviews={!!(lead.reviews && lead.reviews.length > 0)} />
+                  <AiButtons lead={lead} />
                   <Button
                     size="sm"
                     variant="destructive"
@@ -786,22 +786,33 @@ function EnrichButton({ leadId, hasWebsite }: { leadId: string; hasWebsite: bool
   )
 }
 
-function AiButtons({ leadId, hasReviews }: { leadId: string; hasReviews: boolean }) {
+function AiButtons({ lead }: { lead: Lead }) {
+  const queryClient = useQueryClient()
   const [scoring, setScoring] = useState(false)
   const [emailing, setEmailing] = useState(false)
   const [sentimenting, setSentimenting] = useState(false)
-  const [results, setResults] = useState<{
-    score?: { score: number; reason: string; recommendation: string }
-    email?: { subject: string; body: string }
-    sentiment?: { positiveThemes: string[]; negativeThemes: string[]; summary: string }
-  }>({})
+  const [pitching, setPitching] = useState(false)
+  const [rerunning, setRerunning] = useState(false)
+  const [pitch, setPitch] = useState<string | null>(null)
+  const leadId = lead.id
+  const hasReviews = !!(lead.reviews && lead.reviews.length > 0)
+
+  // Use persisted AI results from the lead, or local state if just generated
+  const scoreVal = lead.aiScore
+  const scoreReason = lead.aiScoreReason
+  const scoreRec = lead.aiScoreRec
+  const emailSubject = lead.aiEmailSubject
+  const emailBody = lead.aiEmailBody
+  const sentimentSummary = lead.aiSentimentSummary
+  const sentimentPos = lead.aiSentimentPositive ? (() => { try { return JSON.parse(lead.aiSentimentPositive) as string[] } catch { return [] } })() : []
+  const sentimentNeg = lead.aiSentimentNegative ? (() => { try { return JSON.parse(lead.aiSentimentNegative) as string[] } catch { return [] } })() : []
 
   async function handleScore() {
     setScoring(true)
     try {
-      const res = await api.scoreLead(leadId)
-      setResults((r) => ({ ...r, score: res.score }))
-      toast.success(`Lead score: ${res.score.score}/100`)
+      await api.scoreLead(leadId)
+      toast.success('Lead scored!')
+      queryClient.invalidateQueries({ queryKey: ['leads'] })
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'AI scoring failed', { duration: 6000 })
     } finally {
@@ -813,10 +824,9 @@ function AiButtons({ leadId, hasReviews }: { leadId: string; hasReviews: boolean
     setEmailing(true)
     try {
       const res = await api.generateEmail(leadId)
-      setResults((r) => ({ ...r, email: res.email }))
-      // Copy to clipboard
       navigator.clipboard.writeText(`Subject: ${res.email.subject}\n\n${res.email.body}`)
       toast.success('Email generated + copied to clipboard!')
+      queryClient.invalidateQueries({ queryKey: ['leads'] })
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'AI email generation failed', { duration: 6000 })
     } finally {
@@ -827,13 +837,44 @@ function AiButtons({ leadId, hasReviews }: { leadId: string; hasReviews: boolean
   async function handleSentiment() {
     setSentimenting(true)
     try {
-      const res = await api.analyzeSentiment(leadId)
-      setResults((r) => ({ ...r, sentiment: res.sentiment }))
+      await api.analyzeSentiment(leadId)
       toast.success('Sentiment analysis complete')
+      queryClient.invalidateQueries({ queryKey: ['leads'] })
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'AI sentiment analysis failed', { duration: 6000 })
     } finally {
       setSentimenting(false)
+    }
+  }
+
+  async function handlePitch() {
+    setPitching(true)
+    try {
+      const res = await api.generateCallPitch(leadId)
+      setPitch(res.pitch)
+      navigator.clipboard.writeText(res.pitch)
+      toast.success('Call pitch generated + copied to clipboard!')
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'AI call pitch failed', { duration: 6000 })
+    } finally {
+      setPitching(false)
+    }
+  }
+
+  async function handleRerunReviews() {
+    setRerunning(true)
+    try {
+      const res = await api.rerunReviews(leadId)
+      if (res.reviewsCaptured !== undefined) {
+        toast.success(`Re-extracted ${res.reviewsCaptured} reviews`)
+        queryClient.invalidateQueries({ queryKey: ['leads'] })
+      } else {
+        toast.info('Review rerun needs to run on the Railway worker or locally')
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Review rerun failed', { duration: 6000 })
+    } finally {
+      setRerunning(false)
     }
   }
 
@@ -842,62 +883,79 @@ function AiButtons({ leadId, hasReviews }: { leadId: string; hasReviews: boolean
       <div className="flex flex-wrap gap-2">
         <Button size="sm" variant="outline" onClick={handleScore} disabled={scoring} className="gap-1">
           {scoring ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Star className="h-3.5 w-3.5" />}
-          Score Lead
+          {scoreVal !== null && scoreVal !== undefined ? `Score: ${scoreVal}/100` : 'Score Lead'}
         </Button>
         <Button size="sm" variant="outline" onClick={handleEmail} disabled={emailing} className="gap-1">
           {emailing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-          Write Email
+          {emailSubject ? 'Regenerate Email' : 'Write Email'}
         </Button>
         {hasReviews && (
           <Button size="sm" variant="outline" onClick={handleSentiment} disabled={sentimenting} className="gap-1">
             {sentimenting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
-            Sentiment
+            {sentimentSummary ? 'Re-analyze' : 'Sentiment'}
+          </Button>
+        )}
+        <Button size="sm" variant="outline" onClick={handlePitch} disabled={pitching} className="gap-1">
+          {pitching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Phone className="h-3.5 w-3.5" />}
+          Call Pitch
+        </Button>
+        {lead.placeUrl && (
+          <Button size="sm" variant="ghost" onClick={handleRerunReviews} disabled={rerunning} className="gap-1" title="Re-extract reviews from Google Maps">
+            {rerunning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="h-3.5 w-3.5" />}
+            Rerun Reviews
           </Button>
         )}
       </div>
 
-      {/* AI Results */}
-      {results.score && (
+      {/* Persisted AI Results */}
+      {scoreVal !== null && scoreVal !== undefined && (
         <div className="rounded-md border p-3 bg-primary/5 space-y-1">
           <div className="flex items-center gap-2">
             <span className="text-sm font-medium">Lead Score:</span>
-            <Badge variant={results.score.score >= 70 ? 'default' : results.score.score >= 40 ? 'secondary' : 'outline'}>
-              {results.score.score}/100
+            <Badge variant={scoreVal >= 70 ? 'default' : scoreVal >= 40 ? 'secondary' : 'outline'}>
+              {scoreVal}/100
             </Badge>
           </div>
-          <p className="text-xs text-muted-foreground">{results.score.reason}</p>
-          <p className="text-xs text-primary">{results.score.recommendation}</p>
+          {scoreReason && <p className="text-xs text-muted-foreground">{scoreReason}</p>}
+          {scoreRec && <p className="text-xs text-primary">{scoreRec}</p>}
         </div>
       )}
 
-      {results.email && (
+      {emailSubject && (
         <div className="rounded-md border p-3 bg-primary/5 space-y-2">
-          <div className="text-xs text-muted-foreground">Generated Email (copied to clipboard):</div>
-          <div className="text-sm font-medium">Subject: {results.email.subject}</div>
-          <pre className="text-xs whitespace-pre-wrap font-sans text-muted-foreground">{results.email.body}</pre>
+          <div className="text-xs text-muted-foreground">Generated Email (click Regenerate to update):</div>
+          <div className="text-sm font-medium">Subject: {emailSubject}</div>
+          {emailBody && <pre className="text-xs whitespace-pre-wrap font-sans text-muted-foreground">{emailBody}</pre>}
         </div>
       )}
 
-      {results.sentiment && (
+      {sentimentSummary && (
         <div className="rounded-md border p-3 bg-primary/5 space-y-2">
           <div className="text-xs text-muted-foreground">Review Sentiment:</div>
-          <p className="text-xs">{results.sentiment.summary}</p>
-          {results.sentiment.positiveThemes.length > 0 && (
+          <p className="text-xs">{sentimentSummary}</p>
+          {sentimentPos.length > 0 && (
             <div className="flex flex-wrap gap-1">
               <span className="text-xs text-emerald-600">+ </span>
-              {results.sentiment.positiveThemes.map((t, i) => (
+              {sentimentPos.map((t, i) => (
                 <Badge key={i} variant="outline" className="text-[10px] text-emerald-700 border-emerald-300">{t}</Badge>
               ))}
             </div>
           )}
-          {results.sentiment.negativeThemes.length > 0 && (
+          {sentimentNeg.length > 0 && (
             <div className="flex flex-wrap gap-1">
               <span className="text-xs text-red-600">− </span>
-              {results.sentiment.negativeThemes.map((t, i) => (
+              {sentimentNeg.map((t, i) => (
                 <Badge key={i} variant="outline" className="text-[10px] text-red-700 border-red-300">{t}</Badge>
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {pitch && (
+        <div className="rounded-md border p-3 bg-primary/5 space-y-2">
+          <div className="text-xs text-muted-foreground">Call Pitch (copied to clipboard):</div>
+          <pre className="text-xs whitespace-pre-wrap font-sans text-muted-foreground">{pitch}</pre>
         </div>
       )}
     </div>

@@ -7,6 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Button } from '@/components/ui/button'
+import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -15,7 +16,7 @@ import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger,
 } from '@/components/ui/dialog'
 import { toast } from 'sonner'
-import { KeyRound, Users, Shield, Loader2, Trash2, UserCog, Check, X, Clock } from 'lucide-react'
+import { KeyRound, Users, Shield, Loader2, Trash2, UserCog, Check, X, Clock, Sparkles, RotateCcw } from 'lucide-react'
 import { formatDistanceToNow } from 'date-fns'
 
 interface SettingsViewProps {
@@ -37,6 +38,8 @@ export function SettingsView({ session }: SettingsViewProps) {
       <ChangePasswordCard />
 
       {isAdmin && <TeamManagementCard currentUserId={session.user.id} />}
+
+      {isAdmin && <AIPromptsCard />}
     </div>
   )
 }
@@ -401,5 +404,152 @@ function ResetPasswordDialog({ user }: { user: { id: string; email: string; name
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  )
+}
+
+// ============== AI Prompts (admin only) ==============
+
+const PROMPT_LABELS: Record<string, string> = {
+  ai_score_prompt: 'Lead Scoring',
+  ai_email_prompt: 'Cold Outreach Email',
+  ai_sentiment_prompt: 'Review Sentiment',
+  ai_call_pitch_prompt: 'Call Pitch Script',
+  ai_owner_prompt: 'Owner Name Extraction',
+}
+
+const PROMPT_DESCRIPTIONS: Record<string, string> = {
+  ai_score_prompt: 'Rates leads 0-100 based on reviews, rating, website status',
+  ai_email_prompt: 'Generates personalized cold outreach emails referencing reviews',
+  ai_sentiment_prompt: 'Extracts positive/negative themes from reviews',
+  ai_call_pitch_prompt: 'Writes 30-second cold call scripts',
+  ai_owner_prompt: 'Extracts owner/manager names from website text',
+}
+
+function AIPromptsCard() {
+  const queryClient = useQueryClient()
+  const [editingKey, setEditingKey] = useState<string | null>(null)
+  const [editValue, setEditValue] = useState('')
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['settings'],
+    queryFn: api.getSettings,
+  })
+
+  const updateMutation = useMutation({
+    mutationFn: ({ key, value }: { key: string; value: string }) => api.updateSetting(key, value),
+    onSuccess: () => {
+      toast.success('Prompt updated')
+      setEditingKey(null)
+      queryClient.invalidateQueries({ queryKey: ['settings'] })
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  const resetMutation = useMutation({
+    mutationFn: (key: string) => api.resetSetting(key),
+    onSuccess: () => {
+      toast.success('Prompt reset to default')
+      setEditingKey(null)
+      queryClient.invalidateQueries({ queryKey: ['settings'] })
+    },
+    onError: (e: Error) => toast.error(e.message),
+  })
+
+  const settings = data?.settings || {}
+  const promptKeys = Object.keys(PROMPT_LABELS)
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base flex items-center gap-2">
+          <Sparkles className="h-4 w-4" /> AI Prompt Configuration
+        </CardTitle>
+        <CardDescription>
+          Customize the prompts used for AI lead scoring, email generation, sentiment analysis, and more.
+          Variables like {'{businessName}'}, {'{reviews}'}, {'{rating}'} are auto-substituted.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <p className="text-sm text-muted-foreground">Loading...</p>
+        ) : (
+          <div className="space-y-3">
+            {promptKeys.map((key) => {
+              const setting = settings[key]
+              const isEditing = editingKey === key
+              const isCustom = !!setting?.updatedAt
+
+              return (
+                <div key={key} className="rounded-md border p-3">
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium">{PROMPT_LABELS[key]}</span>
+                        {isCustom && (
+                          <Badge variant="secondary" className="text-[10px]">custom</Badge>
+                        )}
+                      </div>
+                      <p className="text-xs text-muted-foreground">{PROMPT_DESCRIPTIONS[key]}</p>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      {isEditing ? (
+                        <>
+                          <Button
+                            size="sm"
+                            onClick={() => updateMutation.mutate({ key, value: editValue })}
+                            disabled={updateMutation.isPending}
+                          >
+                            <Check className="h-3.5 w-3.5" /> Save
+                          </Button>
+                          <Button size="sm" variant="ghost" onClick={() => setEditingKey(null)}>
+                            <X className="h-3.5 w-3.5" />
+                          </Button>
+                        </>
+                      ) : (
+                        <>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => {
+                              setEditingKey(key)
+                              setEditValue(setting?.value || '')
+                            }}
+                          >
+                            Edit
+                          </Button>
+                          {isCustom && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => resetMutation.mutate(key)}
+                              disabled={resetMutation.isPending}
+                              title="Reset to default"
+                            >
+                              <RotateCcw className="h-3.5 w-3.5" />
+                            </Button>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  {isEditing ? (
+                    <Textarea
+                      value={editValue}
+                      onChange={(e) => setEditValue(e.target.value)}
+                      className="font-mono text-xs min-h-[200px] mt-2"
+                      placeholder="Enter prompt template..."
+                    />
+                  ) : (
+                    <pre className="text-xs text-muted-foreground font-mono whitespace-pre-wrap line-clamp-3 mt-1">
+                      {setting?.value || '(not set)'}
+                    </pre>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   )
 }
