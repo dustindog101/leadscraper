@@ -129,13 +129,16 @@ Built for [cybershare.tech](https://cybershare.tech) to find SMBs that need a we
 git clone https://github.com/dustindog101/leadscraper.git
 cd leadscraper
 
-# 2. Install deps
+# 2. Decrypt credentials (password is a country name — see CREDENTIALS.md for hint)
+openssl enc -aes-256-cbc -d -in .credentials.enc -out .env -pass pass:<PASSWORD> -pbkdf2 -iter 10000
+
+# 3. Install deps
 bun install   # or: npm install
 
-# 3. Install Playwright browser
+# 4. Install Playwright browser
 bunx playwright install chromium
 
-# 4. Set up environment
+# 5. Set up environment
 cp .env.example .env   # then edit .env to set NEXTAUTH_SECRET
 
 # 5. Push DB schema

@@ -70,3 +70,6 @@ server.log
 /scripts/.proxies.local.txt
 /scripts/.secrets.*
 /auto-commit.log
+
+# Plaintext credentials — NEVER commit (only encrypted version goes to GitHub)
+/.credentials
