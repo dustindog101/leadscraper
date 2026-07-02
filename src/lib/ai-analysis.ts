@@ -1,284 +1,143 @@
 /**
  * AI-powered lead analysis using Mistral AI.
- *
- * Features:
- * 1. Lead scoring — rates lead quality based on reviews + website status
- * 2. Cold outreach email generation — personalized email using review themes
- * 3. Review sentiment analysis — extracts positive/negative themes from reviews
+ * Results are PERSISTED on the Lead model.
+ * Uses configurable prompts from the Setting table.
  */
 
+import { db } from './db'
 import type { Review } from './scraper'
 
 const MISTRAL_API_URL = 'https://api.mistral.ai/v1/chat/completions'
 const MISTRAL_MODEL = 'mistral-small-latest'
 const RATE_LIMIT_MS = 1100
-
 let lastRequestTime = 0
+let promptCache: Record<string, string> | null = null
+let promptCacheTime = 0
 
-async function rateLimit(): Promise<void> {
+async function rateLimit() {
   const now = Date.now()
-  const elapsed = now - lastRequestTime
-  if (elapsed < RATE_LIMIT_MS) {
-    await sleep(RATE_LIMIT_MS - elapsed)
-  }
+  if (now - lastRequestTime < RATE_LIMIT_MS) await sleep(RATE_LIMIT_MS - (now - lastRequestTime))
   lastRequestTime = Date.now()
 }
+function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)) }
 
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms))
+async function getPrompt(key: string, vars: Record<string, string>): Promise<string> {
+  if (!promptCache || Date.now() - promptCacheTime > 60_000) {
+    try { const s = await db.setting.findMany(); promptCache = {}; s.forEach(x => promptCache![x.key] = x.value) } catch { promptCache = {} }
+    promptCacheTime = Date.now()
+  }
+  let tpl = promptCache?.[key] || DEFAULT_PROMPTS[key] || ''
+  for (const [k, v] of Object.entries(vars)) tpl = tpl.replace(new RegExp(`\\{${k}\\}`, 'g'), v)
+  return tpl
+}
+
+const DEFAULT_PROMPTS: Record<string, string> = {
+  ai_score_prompt: `You are a B2B sales intelligence assistant for a web design agency (cybershare.tech). Score this lead 0-100.\n\nHigher score = more likely to need a website and have budget.\n\nFactors:\n- No website = HIGHER priority\n- Low rating/negative reviews = opportunity\n- High review count = established business\n- Service businesses = good targets\n\nBusiness: {businessName}\nCategory: {category}\nRating: {rating} ({reviewsCount} reviews)\nHas website: {hasWebsite}\n\nReviews:\n{reviews}\n\nReturn ONLY JSON: {"score": <0-100>, "reason": "<one sentence>", "recommendation": "<one sentence>"}`,
+  ai_email_prompt: `Write a cold outreach email for cybershare.tech reaching out to this business.\n\nBusiness: {businessName}\nCategory: {category}\nRating: {rating} ({reviewsCount} reviews)\nHas website: {hasWebsite}\n\nReviews:\n{reviews}\n\nRequirements:\n- Subject: catchy, mentions business name, under 60 chars\n- Body: 3-4 short paragraphs, friendly but professional\n- Reference something specific from reviews\n- If no website, mention that. If has website, suggest improvements.\n- End with: "Would you be open to a quick 10-min call this week?"\n- Sign off as "Manny from cybershare.tech"\n\nReturn ONLY JSON: {"subject": "<subject>", "body": "<email body>"}`,
+  ai_sentiment_prompt: `Analyze these reviews. Extract positive/negative themes.\n\nReviews:\n{reviews}\n\nReturn ONLY JSON: {"positiveThemes": ["theme1","theme2"], "negativeThemes": ["theme1"], "summary": "<2-3 sentences>"}`,
+  ai_call_pitch_prompt: `Write a 30-second cold call script for cybershare.tech calling this business.\n\nBusiness: {businessName}\nCategory: {category}\nRating: {rating} ({reviewsCount} reviews)\nHas website: {hasWebsite}\n\nReviews:\n{reviews}\n\nRequirements:\n- Start with friendly opener mentioning something from reviews\n- 2-3 sentences (30 seconds spoken)\n- Mention you help businesses improve online presence\n- End with: "Would you be against a quick 10-minute call later this week?"\n\nReturn ONLY the script text (no JSON, no markdown).`,
+  ai_owner_prompt: `Extract owner/manager names from this business website text.\n\nReturn ONLY a JSON array: [{"name":"John Smith","title":"Owner","email":null,"confidence":0.9}]\nIf no people found, return: []\n\nWebsite text:\n---\n{websiteText}\n---`,
 }
 
 async function callMistral(prompt: string, maxTokens = 500): Promise<string | null> {
   const apiKey = process.env.MISTRAL_API_KEY
   if (!apiKey) return null
-
   await rateLimit()
-
   try {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 15000)
-
     const res = await fetch(MISTRAL_API_URL, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: MISTRAL_MODEL,
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.3,
-        max_tokens: maxTokens,
-      }),
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+      body: JSON.stringify({ model: MISTRAL_MODEL, messages: [{ role: 'user', content: prompt }], temperature: 0.3, max_tokens: maxTokens }),
       signal: controller.signal,
     })
     clearTimeout(timeout)
-
-    if (!res.ok) {
-      console.error(`[ai] Mistral API error: ${res.status} ${res.statusText}`)
-      return null
-    }
-
+    if (!res.ok) return null
     const data = await res.json()
     return data?.choices?.[0]?.message?.content || ''
-  } catch (e) {
-    console.error('[ai] Mistral call failed:', e instanceof Error ? e.message : String(e))
-    return null
-  }
+  } catch { return null }
 }
 
-export interface LeadScore {
-  score: number  // 0-100
-  reason: string
-  recommendation: string
+function fmtReviews(reviews: Review[]): string {
+  if (!reviews?.length) return '(no reviews captured)'
+  return reviews.slice(0, 5).map(r => `[${r.rating}★] ${r.authorName}: ${r.text.slice(0, 200)}`).join('\n')
 }
 
-/**
- * Score a lead based on its data + reviews.
- * Higher score = better prospect for cybershare.tech (needs a website).
- */
-export async function scoreLead(params: {
-  businessName: string
-  category?: string | null
-  rating?: number | null
-  reviewsCount?: number | null
-  hasWebsite: boolean
-  city?: string | null
-  reviews?: Review[]
-}): Promise<LeadScore | null> {
-  const { businessName, category, rating, reviewsCount, hasWebsite, city, reviews } = params
+export interface LeadScore { score: number; reason: string; recommendation: string }
 
-  const reviewText = reviews && reviews.length > 0
-    ? reviews.map((r) => `[${r.rating}★] ${r.authorName}: ${r.text.slice(0, 200)}`).join('\n')
-    : '(no reviews captured)'
-
-  const prompt = `You are a B2B sales intelligence assistant for a web design agency (cybershare.tech). Score this lead on a scale of 0-100 for how good a prospect they are.
-
-Higher score = more likely to need a website and have budget to pay for one.
-
-Factors to consider:
-- No website = HIGHER priority (they need one!)
-- Low rating or negative reviews = opportunity to help them improve
-- High review count = established business with revenue
-- Service businesses (barbers, plumbers, etc.) are good targets
-- Chain/franchise locations = lower priority (corporate decides)
-
-Business: ${businessName}
-Category: ${category || 'unknown'}
-Location: ${city || 'unknown'}
-Rating: ${rating || 'no rating'} (${reviewsCount || 0} reviews)
-Has website: ${hasWebsite ? 'yes' : 'NO'}
-
-Reviews:
-${reviewText}
-
-Return ONLY a JSON object (no markdown):
-{
-  "score": <0-100>,
-  "reason": "<one sentence why this score>",
-  "recommendation": "<one sentence on how to approach this lead>"
-}`
-
+export async function scoreLead(leadId: string): Promise<LeadScore | null> {
+  const lead = await db.lead.findUnique({ where: { id: leadId }, include: { reviews: { take: 5, orderBy: { capturedAt: 'desc' } } } })
+  if (!lead) return null
+  const prompt = await getPrompt('ai_score_prompt', {
+    businessName: lead.businessName, category: lead.category || 'unknown',
+    rating: String(lead.rating || 'no rating'), reviewsCount: String(lead.reviewsCount || 0),
+    hasWebsite: lead.website ? 'yes' : 'NO',
+    reviews: fmtReviews(lead.reviews.map(r => ({ authorName: r.authorName, rating: r.rating, text: r.text, relativeDate: r.relativeDate || undefined }))),
+  })
   const result = await callMistral(prompt, 300)
   if (!result) return null
-
   try {
-    const jsonMatch = result.match(/\{[\s\S]*\}/)
-    if (!jsonMatch) return null
-    const parsed = JSON.parse(jsonMatch[0])
-    return {
-      score: Math.min(100, Math.max(0, Number(parsed.score) || 50)),
-      reason: String(parsed.reason || '').slice(0, 300),
-      recommendation: String(parsed.recommendation || '').slice(0, 300),
-    }
-  } catch {
-    return null
-  }
+    const m = result.match(/\{[\s\S]*\}/); if (!m) return null
+    const p = JSON.parse(m[0])
+    const score: LeadScore = { score: Math.min(100, Math.max(0, Number(p.score) || 50)), reason: String(p.reason || '').slice(0, 300), recommendation: String(p.recommendation || '').slice(0, 300) }
+    await db.lead.update({ where: { id: leadId }, data: { aiScore: score.score, aiScoreReason: score.reason, aiScoreRec: score.recommendation, aiScoreAt: new Date() } })
+    return score
+  } catch { return null }
 }
 
-export interface EmailTemplate {
-  subject: string
-  body: string
-}
+export interface EmailTemplate { subject: string; body: string }
 
-/**
- * Generate a personalized cold outreach email using the lead's review themes.
- */
-export async function generateOutreachEmail(params: {
-  businessName: string
-  category?: string | null
-  city?: string | null
-  rating?: number | null
-  reviewsCount?: number | null
-  hasWebsite: boolean
-  reviews?: Review[]
-}): Promise<EmailTemplate | null> {
-  const { businessName, category, city, rating, reviewsCount, hasWebsite, reviews } = params
-
-  const reviewSummary = reviews && reviews.length > 0
-    ? reviews.slice(0, 3).map((r) => `- "${r.text.slice(0, 150)}" — ${r.authorName} (${r.rating}★)`)
-    : '(no reviews available)'
-
-  const prompt = `Write a personalized cold outreach email for a web design agency (cybershare.tech) reaching out to this business.
-
-Business: ${businessName}
-Category: ${category || 'unknown'}
-Location: ${city || 'unknown'}
-Rating: ${rating || 'no rating'} (${reviewsCount || 0} reviews)
-Has website: ${hasWebsite ? 'yes' : 'NO — they need one!'}
-
-Recent reviews:
-${reviewSummary}
-
-Requirements:
-- Subject line: catchy, mentions their business name, under 60 chars
-- Body: 3-4 short paragraphs, friendly but professional
-- Reference something specific from their reviews (shows you did research)
-- If they have no website, mention that. If they have a website, suggest improvements.
-- End with a soft CTA: "Would you be open to a quick 10-min call this week?"
-- Sign off as "Manny from cybershare.tech"
-
-Return ONLY a JSON object:
-{
-  "subject": "<subject line>",
-  "body": "<full email body with line breaks>"
-}`
-
+export async function generateOutreachEmail(leadId: string): Promise<EmailTemplate | null> {
+  const lead = await db.lead.findUnique({ where: { id: leadId }, include: { reviews: { take: 3, orderBy: { capturedAt: 'desc' } } } })
+  if (!lead) return null
+  const prompt = await getPrompt('ai_email_prompt', {
+    businessName: lead.businessName, category: lead.category || 'unknown',
+    rating: String(lead.rating || 'no rating'), reviewsCount: String(lead.reviewsCount || 0),
+    hasWebsite: lead.website ? 'yes' : 'NO',
+    reviews: fmtReviews(lead.reviews.map(r => ({ authorName: r.authorName, rating: r.rating, text: r.text, relativeDate: r.relativeDate || undefined }))),
+  })
   const result = await callMistral(prompt, 800)
   if (!result) return null
-
   try {
-    const jsonMatch = result.match(/\{[\s\S]*\}/)
-    if (!jsonMatch) return null
-    const parsed = JSON.parse(jsonMatch[0])
-    return {
-      subject: String(parsed.subject || '').slice(0, 200),
-      body: String(parsed.body || '').slice(0, 2000),
-    }
-  } catch {
-    return null
-  }
+    const m = result.match(/\{[\s\S]*\}/); if (!m) return null
+    const p = JSON.parse(m[0])
+    const email: EmailTemplate = { subject: String(p.subject || '').slice(0, 200), body: String(p.body || '').slice(0, 2000) }
+    await db.lead.update({ where: { id: leadId }, data: { aiEmailSubject: email.subject, aiEmailBody: email.body, aiEmailAt: new Date() } })
+    return email
+  } catch { return null }
 }
 
-export interface ReviewSentiment {
-  positiveThemes: string[]
-  negativeThemes: string[]
-  summary: string
-}
+export interface ReviewSentiment { positiveThemes: string[]; negativeThemes: string[]; summary: string }
 
-/**
- * Analyze review sentiment — extract positive/negative themes.
- */
-export async function analyzeReviewSentiment(reviews: Review[]): Promise<ReviewSentiment | null> {
-  if (!reviews || reviews.length === 0) return null
-
-  const reviewText = reviews.map((r) => `[${r.rating}★] ${r.text}`).join('\n')
-
-  const prompt = `Analyze these Google Maps reviews for a business. Extract the main positive and negative themes.
-
-Reviews:
-${reviewText}
-
-Return ONLY a JSON object:
-{
-  "positiveThemes": ["theme 1", "theme 2", "theme 3"],
-  "negativeThemes": ["theme 1", "theme 2"],
-  "summary": "<2-3 sentence summary of what customers think>"
-}`
-
+export async function analyzeReviewSentiment(leadId: string): Promise<ReviewSentiment | null> {
+  const lead = await db.lead.findUnique({ where: { id: leadId }, include: { reviews: { take: 5, orderBy: { capturedAt: 'desc' } } } })
+  if (!lead || lead.reviews.length === 0) return null
+  const reviewText = lead.reviews.map(r => `[${r.rating}★] ${r.text}`).join('\n')
+  const prompt = await getPrompt('ai_sentiment_prompt', { reviews: reviewText })
   const result = await callMistral(prompt, 400)
   if (!result) return null
-
   try {
-    const jsonMatch = result.match(/\{[\s\S]*\}/)
-    if (!jsonMatch) return null
-    const parsed = JSON.parse(jsonMatch[0])
-    return {
-      positiveThemes: Array.isArray(parsed.positiveThemes) ? parsed.positiveThemes.slice(0, 5).map(String) : [],
-      negativeThemes: Array.isArray(parsed.negativeThemes) ? parsed.negativeThemes.slice(0, 5).map(String) : [],
-      summary: String(parsed.summary || '').slice(0, 500),
+    const m = result.match(/\{[\s\S]*\}/); if (!m) return null
+    const p = JSON.parse(m[0])
+    const sentiment: ReviewSentiment = {
+      positiveThemes: Array.isArray(p.positiveThemes) ? p.positiveThemes.slice(0, 5).map(String) : [],
+      negativeThemes: Array.isArray(p.negativeThemes) ? p.negativeThemes.slice(0, 5).map(String) : [],
+      summary: String(p.summary || '').slice(0, 500),
     }
-  } catch {
-    return null
-  }
+    await db.lead.update({ where: { id: leadId }, data: { aiSentimentSummary: sentiment.summary, aiSentimentPositive: JSON.stringify(sentiment.positiveThemes), aiSentimentNegative: JSON.stringify(sentiment.negativeThemes), aiSentimentAt: new Date() } })
+    return sentiment
+  } catch { return null }
 }
 
-/**
- * Generate a 30-second cold call script.
- */
-export async function generateCallPitch(params: {
-  businessName: string
-  category?: string | null
-  city?: string | null
-  rating?: number | null
-  reviewsCount?: number | null
-  hasWebsite: boolean
-  reviews?: Review[]
-}): Promise<string | null> {
-  const { businessName, category, rating, reviewsCount, hasWebsite, reviews } = params
-
-  const reviewSummary = reviews && reviews.length > 0
-    ? reviews.slice(0, 3).map((r) => `- "${r.text.slice(0, 150)}" — ${r.authorName} (${r.rating}★)`)
-    : '(no reviews available)'
-
-  const prompt = `Write a 30-second cold call script for a web design agency (cybershare.tech) calling this business.
-
-Business: ${businessName}
-Category: ${category || 'unknown'}
-Rating: ${rating || 'no rating'} (${reviewsCount || 0} reviews)
-Has website: ${hasWebsite ? 'yes' : 'NO — they need one!'}
-
-Reviews summary:
-${reviewSummary}
-
-Requirements:
-- Start with a friendly opener mentioning something specific from their reviews
-- 2-3 sentences max (30 seconds when spoken)
-- Mention you help businesses like theirs improve their online presence
-- End with: "Would you be against a quick 10-minute call later this week?"
-- Sound natural, not scripted
-
-Return ONLY the script text (no JSON, no markdown).`
-
+export async function generateCallPitch(leadId: string): Promise<string | null> {
+  const lead = await db.lead.findUnique({ where: { id: leadId }, include: { reviews: { take: 3, orderBy: { capturedAt: 'desc' } } } })
+  if (!lead) return null
+  const prompt = await getPrompt('ai_call_pitch_prompt', {
+    businessName: lead.businessName, category: lead.category || 'unknown',
+    rating: String(lead.rating || 'no rating'), reviewsCount: String(lead.reviewsCount || 0),
+    hasWebsite: lead.website ? 'yes' : 'NO',
+    reviews: fmtReviews(lead.reviews.map(r => ({ authorName: r.authorName, rating: r.rating, text: r.text, relativeDate: r.relativeDate || undefined }))),
+  })
   return await callMistral(prompt, 400)
 }
